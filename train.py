@@ -21,6 +21,10 @@ import torch.multiprocessing as mp
 from fastcore.script import call_parse, bool_arg
 from peft import get_peft_model, LoraConfig, TaskType
 
+import copy
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -135,17 +139,59 @@ def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None
         pass  # it's a buffer
     setattr(submodule, value_key, value)
 
-# # Js version
-# def load_param(module, name, value, device=None, dtype=None):
-#     mn,_,tn = name.rpartition('.')
-#     subm = module.get_submodule(mn)
-#     if device: newv = value.to(device)
-#     if dtype:  newv = value.to(dtype)
-#     try:
-#         param = subm.get_parameter(tn)
-#         newv = type(param)(newv, requires_grad=param.requires_grad)
-#     except AttributeError: pass  # it's a buffer
-#     setattr(subm, tn, newv)
+
+### DATASET (modified from llama recipes)
+PROMPT_DICT = {
+    "prompt_input": (
+        "Below is an instruction that describes a task, paired with an input that provides further context. "
+        "Write a response that appropriately completes the request.\n\n"
+        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+    ),
+    "prompt_no_input": (
+        "Below is an instruction that describes a task. "
+        "Write a response that appropriately completes the request.\n\n"
+        "### Instruction:\n{instruction}\n\n### Response:"
+    ),
+}
+
+class InstructionDataset(Dataset):
+    def __init__(self, dataset, tokenizer, partition="train"):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
+
+
+        ann = self.dataset[index]
+        if ann.get("input", "") == "":
+            prompt = PROMPT_DICT["prompt_no_input"].format_map(ann)
+        else:
+            prompt = PROMPT_DICT["prompt_input"].format_map(ann)
+        example = prompt + ann["output"]
+        prompt = torch.tensor(
+            self.tokenizer.encode(prompt), dtype=torch.int64
+        )
+        example = self.tokenizer.encode(example)
+        example.append(self.tokenizer.eos_token_id)
+        example = torch.tensor(
+            example, dtype=torch.int64
+        )
+        labels = copy.deepcopy(example)
+        labels[: len(prompt)] = -1
+        example_mask = example.ge(0)
+        label_mask = labels.ge(0)
+        example[~example_mask] = 0
+        labels[~label_mask] = IGNORE_INDEX
+
+        return {
+            "input_ids": example.tolist(),
+            "labels": labels.tolist(),
+            "attention_mask":example_mask.tolist(),
+        }
 
 # Main function, run on each process
 def fsdp_main(rank, world_size, args):
@@ -171,6 +217,40 @@ def fsdp_main(rank, world_size, args):
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args["model_name"])
+    tokenizer.pad_token_id = tokenizer.eos_token_id # TODO check if it exists first
+
+    # # Set up dataset
+    from datasets import Dataset, load_dataset
+    if args["dataset"] == "alpaca":
+        dataset = load_dataset("yahma/alpaca-cleaned")['train']
+    elif args["dataset"] == "alpaca_sample":
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
+    elif args["dataset"] == "dummy":
+        dataset = Dataset.from_dict({
+            'instruction': ["instruction"]*20, 
+            'input': ["input"]*20, 
+            'output': ["output"*10000]*20} # A long output to test memory usage (gets truncated)
+        )
+
+    dataset = InstructionDataset(dataset, tokenizer)
+    def collate_fn(batch):
+        # To list of tensors
+        input_ids = [torch.tensor(item['input_ids']) for item in batch]
+        attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
+        labels = [torch.tensor(item['labels']) for item in batch]
+        # Pad + truncate
+        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)[:, :args["context_length"]]
+        attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
+        labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
+        # Return dict
+        return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
+
+    # For distributed training, use DistributedSampler
+    sampler = DistributedSampler(dataset)
+
+    # Use the custom collate function in DataLoader
+    dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
+
 
     # Create model
     print("Creating model", rank)
@@ -339,7 +419,7 @@ def fsdp_main(rank, world_size, args):
     for epoch in range(args['num_epochs']):
         model.train()
         ddp_loss = torch.zeros(2).to(rank)
-        for batch_idx in range(20):
+        for batch_idx, batch in enumerate(dataloader):
 
             if rank == 0 and args['verbose']: print(f"Epoch {epoch}, Batch {batch_idx}")
 
@@ -352,30 +432,26 @@ def fsdp_main(rank, world_size, args):
                 print('Training before forwards', torch.cuda.memory_allocated(rank), rank)
                 args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
-            # Get a batch of data
-            length = args["context_length"]
-            vocab_size = 10
-            bs = args["batch_size"]
-            # data = torch.randint(0, vocab_size, (bs, length,)).to(rank)
-            s = "Hello, my dog is cute" * length
-            data = tokenizer.encode(s, return_tensors="pt", max_length=length, truncation=True).to(rank)
-            data = data.repeat(bs, 1) # Repeat to batch size
-
             # Forward pass
-            output = model(data, labels=data)
+            output = model(
+                batch['input_ids'].to(rank), 
+                labels=batch['labels'].to(rank), 
+                attention_mask=batch['attention_mask'].to(rank)
+            )
             loss = output.loss
 
             # Print memory usage once early in training TODO better
             if batch_idx==0:
                 print('Training after forwards', torch.cuda.memory_allocated(rank), rank)
                 args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+                print("Batch shape", batch['input_ids'].shape, rank)
 
             # Backward pass
             loss.backward()
 
             # Record loss
             ddp_loss[0] += loss.item()
-            ddp_loss[1] += len(data)
+            ddp_loss[1] += len(batch['input_ids'])
 
             # Step the optimizer (w/ gradient accumulation)
             if batch_idx%args['gradient_accumulation_steps']==0:
@@ -395,10 +471,11 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
-        # # Print loss
-        # if rank == 0:
-        #     dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
-        #     args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]})
+        # Print loss
+        dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+        if rank == 0:
+            if args["verbose"]: print(f"Epoch {epoch} loss: {ddp_loss[0] / ddp_loss[1]}")
+            args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]})
 
     init_end_event.record()
 
@@ -424,12 +501,12 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: str = "alpaca", # TODO
+    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 20 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload TODO does this work? Low mem usage but slow, GPU usage 0 apart from spurts.
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
     model_dtype: str = "bf16", # fp16, bf16 or fp32. TODO mixed precision investigate
-    model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     output_dir: str = "output", # Output directory to save results to TODO
     lora_rank: int = 8, # LoRA rank for lora/qlora
     lora_alpha: int = 32, # LoRA alpha for lora/qlora
