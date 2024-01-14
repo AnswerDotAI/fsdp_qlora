@@ -414,7 +414,7 @@ def fsdp_main(rank, world_size, args):
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
 
-    # Train loop (fake data)
+    # Train loop
     init_start_event.record()
     for epoch in range(args['num_epochs']):
         model.train()
@@ -450,8 +450,9 @@ def fsdp_main(rank, world_size, args):
             loss.backward()
 
             # Record loss
-            ddp_loss[0] += loss.item()
-            ddp_loss[1] += len(batch['input_ids'])
+            bs = batch['input_ids'].shape[0]
+            ddp_loss[0] += loss.item() * bs
+            ddp_loss[1] += bs
 
             # Step the optimizer (w/ gradient accumulation)
             if batch_idx%args['gradient_accumulation_steps']==0:
@@ -475,8 +476,9 @@ def fsdp_main(rank, world_size, args):
             if batch_idx%args['log_every_n_steps']==0:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
+                ddp_loss = torch.zeros(2).to(rank)
 
-        # Print loss
+        # Print loss NB only last n_steps average not epoch average
         dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
         if rank == 0:
             if args["verbose"]: print(f"Epoch {epoch} loss: {ddp_loss[0] / ddp_loss[1]}")
