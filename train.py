@@ -471,6 +471,11 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
+            # Log loss every n steps (may slow down due to all_reduce?)
+            if batch_idx%args['log_every_n_steps']==0:
+                dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+                args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
+
         # Print loss
         dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
         if rank == 0:
@@ -516,8 +521,8 @@ def main(
     lr: float = 1e-4, # Learning rate
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adadelta", # adam, sgd or adadelta
-    log_to: str = "stdout", # TODO
-    log_every_n_steps: int = 10, # TODO
+    log_to: str = "stdout", # wandb or stdout
+    log_every_n_steps: int = 10, # How frequently to log loss
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
 ):
     # Set world size
