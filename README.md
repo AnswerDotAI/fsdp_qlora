@@ -20,5 +20,8 @@ This is still a work-in-progress, but to start experimenting:
 Check out different combos of settings. For example,
 `python train.py --train_type qlora` to do qlora instead of the default lora
 
-The low-memory option (loading on only one shard and using sync_module_states) works with LoRA but not QLoRA yet. 
-size-based wrapping policy gave an error but I think it should work, will update if I get it going.
+NBs:
+
+- The low-memory option (loading on only one shard and using sync_module_states) works with LoRA but not QLoRA yet. 
+- size-based wrapping policy gave an error but I think it should work, will update if I get it going.
+- the undocumented train_type hf_qlora loads with the transformers load_in_4bit option, which by default gives a ValueError: Cannot flatten integer dtype tensors (since quant_storage default is uint8). If you manually edit the def of Linear4Bit to set the default to bf16 this will work (wit size wrapping policy) and is a useful comparison for exploring what options we have if we want to avoid all the custom model loading stuff.
