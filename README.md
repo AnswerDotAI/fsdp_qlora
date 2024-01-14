@@ -18,7 +18,7 @@ This is still a work-in-progress, but to start experimenting:
 - back in fsdp_qlora folder, run `python train.py` to test lora train
 
 Check out different combos of settings. For example,
-`python train.py --wrapping_policy size --train_type qlora` to do qlora with every layer wrapped individually. 
+`python train.py --train_type qlora` to do qlora instead of the default lora
 
 The low-memory option (loading on only one shard and using sync_module_states) works with LoRA but not QLoRA yet. 
-
+size-based wrapping policy gave an error but I think it should work, will update if I get it going.
