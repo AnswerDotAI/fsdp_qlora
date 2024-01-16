@@ -1,13 +1,12 @@
 """
 This script trains a model using FSDP. It pulls inspiration from
-- llama-recipes TODO link
-- PyTorch FSDP docs TODO link
+- llama-recipes (https://github.com/facebookresearch/llama-recipes/blob/main/src/llama_recipes/finetuning.py)
+- PyTorch FSDP docs (https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html)
 
 For information on the different arguments, run `python train.py --help`
 
-This is still a WIP and has currently only been tested with llama 7B on a single node w/ 2 GPUs
-
-TODO: accompanying blog post
+This is still a WIP and has currently only been tested with llama 7B on a single node w/ 2 GPUs. 
+Not all combinations of arguments will work. See the accompanying blog post for more details.
 """
 
 # Imports
@@ -187,8 +186,9 @@ class InstructionDataset(Dataset):
 def fsdp_main(rank, world_size, args):
 
     # Setup and initialize the process group
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_ADDR'] = args["master_addr"]
+    os.environ['MASTER_PORT'] = args["master_port"]
+    
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -420,10 +420,8 @@ def fsdp_main(rank, world_size, args):
             # Reset peak memory to track that
             torch.cuda.reset_peak_memory_stats(rank)
 
-            # Print memory usage once early in training TODO better
-            if batch_idx==0:
-                print('Training before forwards', torch.cuda.memory_allocated(rank), rank)
-                args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
+            # Log memory usage
+            if batch_idx==0: args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Forward pass
             output = model(
@@ -433,11 +431,8 @@ def fsdp_main(rank, world_size, args):
             )
             loss = output.loss
 
-            # Print memory usage once early in training TODO better
-            if batch_idx==0:
-                print('Training after forwards', torch.cuda.memory_allocated(rank), rank)
-                args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
-                print("Batch shape", batch['input_ids'].shape, rank)
+            # Log memory usage
+            if batch_idx==0: args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Backward pass
             loss.backward()
@@ -452,18 +447,16 @@ def fsdp_main(rank, world_size, args):
                 optimizer.step()
                 optimizer.zero_grad()
 
-            # Print memory usage after backwards
-            if batch_idx==0:
-                print('Training after backwards', torch.cuda.memory_allocated(rank), rank)
-                args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+            # Log memory usage after backwards
+            if batch_idx==0: args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
-            # Print peak memory usage for the whole step
+            # Print + log peak memory usage for the whole first step of training
             if batch_idx==0:
                 peak_memory = torch.cuda.max_memory_allocated(rank)
                 print(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
                 args["logger"].log({"memory_peak": peak_memory}, rank)
 
-            # Delete the output so more memory frees up (!!)
+            # Delete the output so more memory frees up before the next forward pass
             output = None
             loss = None
 
@@ -471,7 +464,7 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
-            # Log loss every n steps (may slow down due to all_reduce?)
+            # Log loss every n steps
             if batch_idx%args['log_every_n_steps']==0:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
@@ -483,19 +476,23 @@ def fsdp_main(rank, world_size, args):
             if args["verbose"]: print(f"Epoch {epoch} loss: {ddp_loss[0] / ddp_loss[1]}")
             args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]})
 
+    # Synchronize at the end and record time
+    dist.barrier()
+    torch.cuda.synchronize()
     init_end_event.record()
+
+    print("Finished training", rank)
 
     # Print time and model
     if rank == 0:
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
         print(f"CUDA event elapsed time: {time_taken} sec")
         args["logger"].log({"time_taken": time_taken})
-
-    # Save model (TODO)
-    print("Finished training", rank, torch.cuda.memory_allocated(rank))
+        
+    # End logging
+    args["logger"].finish(rank=rank)
 
     # Clean up
-    if rank==0: args["logger"].finish(rank=rank)
     dist.destroy_process_group()
 
 # Entry point, using fastcore's call_parse to parse args from command line and then calling fsdp_main
@@ -507,7 +504,7 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 20 long dummy samples
+    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
@@ -525,6 +522,8 @@ def main(
     log_to: str = "stdout", # wandb or stdout
     log_every_n_steps: int = 10, # How frequently to log loss
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
+    master_addr: str = "localhost", # For distributed training
+    master_port: str = "12355", # For distributed training, must be the same for all processes
 ):
     # Set world size
     if world_size == -1:
