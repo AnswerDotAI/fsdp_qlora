@@ -1,7 +1,7 @@
 """
 This script trains a model using FSDP. It pulls inspiration from
 - llama-recipes TODO link
-- PyTOrch FSDP docs TODO link
+- PyTorch FSDP docs TODO link
 
 For information on the different arguments, run `python train.py --help`
 
@@ -11,35 +11,49 @@ TODO: accompanying blog post
 """
 
 # Imports
-import torch
-import os, gc
+
+# General
+import torch, os, gc, time, safetensors, copy
 import functools
 import torch.optim as optim
 import bitsandbytes as bnb
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from fastcore.script import call_parse, bool_arg
-from peft import get_peft_model, LoraConfig, TaskType
 
-import copy
+# Argument parsing
+from fastcore.script import call_parse, bool_arg
+
+# Torch + distributed training
+from torch import nn, Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
-
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+# FSDP
+from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
+from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
     apply_activation_checkpointing,
 )
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-# For different model types, we'll want to import the right stuff for
-# check_fn in activation checkpointing (LlamaDecoderLayer)
+# Model loading
+from safetensors import safe_open
+from bitsandbytes.nn import Linear4bit, Params4bit
+from accelerate import init_empty_weights
+from peft import get_peft_model, LoraConfig, TaskType
+from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+
+
+# For different model types, we'll want to import the right class for the
+# check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
+# Set the target class for activation checkpointing here:
+GC_LAYER_CLASS = LlamaDecoderLayer
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -65,31 +79,7 @@ class Logger:
     def finish(self, rank=0):
         if self.log_to == "wandb" and rank==0: wandb.finish()
 
-# From B TODO tidy
-import torch, time, os, safetensors
-from functools import partial
-from torch import nn, Tensor
-
-from safetensors import safe_open
-from peft import get_peft_model, LoraConfig, TaskType
-from bitsandbytes.nn import Linear4bit, Params4bit
-from accelerate import init_empty_weights
-
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
-
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper,
-    CheckpointImpl,
-    apply_activation_checkpointing,
-)
-
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
-from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload
-import torch.distributed as dist
-
+# Utilities related to model loading
 def replace_linear(model, linear_replacement, skip_modules=["lm_head"], **kwargs):
     """
     Replace linear modules with a new Linear module.
@@ -387,7 +377,7 @@ def fsdp_main(rank, world_size, args):
             checkpoint_wrapper,
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
-        check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
+        check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
         print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
@@ -519,9 +509,9 @@ def main(
     num_epochs: int = 1, # How many epochs of training to do
     dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 20 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
-    use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload TODO does this work? Low mem usage but slow, GPU usage 0 apart from spurts.
+    use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
-    model_dtype: str = "bf16", # fp16, bf16 or fp32. TODO mixed precision investigate
+    model_dtype: str = "bf16", # fp16, bf16 or fp32
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     output_dir: str = "output", # Output directory to save results to TODO
     lora_rank: int = 8, # LoRA rank for lora/qlora
