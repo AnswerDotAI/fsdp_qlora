@@ -227,9 +227,9 @@ def fsdp_main(rank, world_size, args):
         dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*20, 
-            'input': ["input"]*20, 
-            'output': ["output"*10000]*20} # A long output to test memory usage (gets truncated)
+            'instruction': ["instruction"]*16, 
+            'input': ["input"]*16, 
+            'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
         )
 
     dataset = InstructionDataset(dataset, tokenizer)
@@ -427,6 +427,9 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._record_memory_history()
 
+            # Reset peak memory to track that
+            torch.cuda.reset_peak_memory_stats(rank)
+
             # Print memory usage once early in training TODO better
             if batch_idx==0:
                 print('Training before forwards', torch.cuda.memory_allocated(rank), rank)
@@ -463,6 +466,12 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0:
                 print('Training after backwards', torch.cuda.memory_allocated(rank), rank)
                 args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+
+            # Print peak memory usage for the whole step
+            if batch_idx==0:
+                peak_memory = torch.cuda.max_memory_allocated(rank)
+                print(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
+                args["logger"].log({"memory_peak": peak_memory}, rank)
 
             # Delete the output so more memory frees up (!!)
             output = None
