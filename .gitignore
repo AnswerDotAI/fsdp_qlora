@@ -1,1 +1,3 @@
 wandb
+nbs/profile_snapshots
+**/*checkpoint.ipynb
