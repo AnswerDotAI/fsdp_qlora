@@ -2,10 +2,11 @@
 This script trains a model using FSDP. It pulls inspiration from
 - llama-recipes (https://github.com/facebookresearch/llama-recipes/blob/main/src/llama_recipes/finetuning.py)
 - PyTorch FSDP docs (https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html)
+- bitsandbytes (https://github.com/TimDettmers/bitsandbytes)
 
 For information on the different arguments, run `python train.py --help`
 
-This is still a WIP and has currently only been tested with llama 7B on a single node w/ 2 GPUs. 
+This is still a WIP and has currently only been tested with Llama 7B, Mistal 7B, & TinyLlama on a single node w/ 2 GPUs.
 Not all combinations of arguments will work. See the accompanying blog post for more details.
 """
 
@@ -188,7 +189,7 @@ def fsdp_main(rank, world_size, args):
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
     os.environ['MASTER_PORT'] = args["master_port"]
-    
+
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -200,9 +201,28 @@ def fsdp_main(rank, world_size, args):
     init_end_event = torch.cuda.Event(enable_timing=True)
 
     # dtype
-    if args["model_dtype"] == "fp16": torch_dtype = torch.float16
-    elif args["model_dtype"] == "bf16": torch_dtype = torch.bfloat16
-    elif args["model_dtype"] == "fp32": torch_dtype = torch.float32
+    mp_policy = None
+    if args["model_dtype"] == "fp16":
+        torch_dtype = torch.float16
+        compute_dtype = torch.float16
+    elif args["model_dtype"] == "bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise ValueError('Current device does not support bfloat16')
+        torch_dtype = torch.bfloat16
+        compute_dtype = torch.bfloat16
+    elif args["model_dtype"] == "fp32":
+        torch_dtype = torch.float32
+        compute_dtype = torch.float16
+    elif args["model_dtype"] == "amp_bf16":
+        if not torch.cuda.is_bf16_supported():
+            raise ValueError('Current device does not support bfloat16')
+        torch_dtype = torch.bfloat16
+        compute_dtype = torch.bfloat16
+        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
+    elif args["model_dtype"] == "amp_fp32":
+        torch_dtype = torch.float32
+        compute_dtype = torch.float16
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     else: raise ValueError("Invalid model_dtype")
 
     # Load tokenizer
@@ -217,8 +237,8 @@ def fsdp_main(rank, world_size, args):
         dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*16, 
-            'input': ["input"]*16, 
+            'instruction': ["instruction"]*16,
+            'input': ["input"]*16,
             'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
         )
 
@@ -264,7 +284,7 @@ def fsdp_main(rank, world_size, args):
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=False,
-            bnb_4bit_compute_dtype=torch_dtype
+            bnb_4bit_compute_dtype=compute_dtype
         )
         model = AutoModelForCausalLM.from_pretrained(
             args["model_name"],
@@ -278,7 +298,7 @@ def fsdp_main(rank, world_size, args):
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            model.model = replace_linear(model.model, Linear4bit, compute_dtype=torch_dtype,
+            model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
                                          quant_type='nf4', quant_storage=torch_dtype)
         model.is_loaded_in_4bit = True
 
@@ -363,7 +383,7 @@ def fsdp_main(rank, world_size, args):
         sync_module_states=args["low_memory"], # TODO low memory works with LoRA but not QLoRA
         param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
-        mixed_precision=None,
+        mixed_precision=mp_policy,
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
@@ -425,8 +445,8 @@ def fsdp_main(rank, world_size, args):
 
             # Forward pass
             output = model(
-                batch['input_ids'].to(rank), 
-                labels=batch['labels'].to(rank), 
+                batch['input_ids'].to(rank),
+                labels=batch['labels'].to(rank),
                 attention_mask=batch['attention_mask'].to(rank)
             )
             loss = output.loss
@@ -464,17 +484,11 @@ def fsdp_main(rank, world_size, args):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
-            # Log loss every n steps
-            if batch_idx%args['log_every_n_steps']==0:
+            # Log loss every gradient update steps
+            if batch_idx%args['gradient_accumulation_steps']==0:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
-
-        # Print loss NB only last n_steps average not epoch average
-        dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
-        if rank == 0:
-            if args["verbose"]: print(f"Epoch {epoch} loss: {ddp_loss[0] / ddp_loss[1]}")
-            args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]})
 
     # Synchronize at the end and record time
     dist.barrier()
@@ -488,7 +502,7 @@ def fsdp_main(rank, world_size, args):
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
         print(f"CUDA event elapsed time: {time_taken} sec")
         args["logger"].log({"time_taken": time_taken})
-        
+
     # End logging
     args["logger"].finish(rank=rank)
 
@@ -508,7 +522,7 @@ def main(
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
-    model_dtype: str = "bf16", # fp16, bf16 or fp32
+    model_dtype: str = "bf16", # fp16, bf16, fp32, amp_bf16, or amp_fp32. All amp flags run in mixed precision, setting parameters, gradient comms & buffers to that precision.
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     output_dir: str = "output", # Output directory to save results to TODO
     lora_rank: int = 8, # LoRA rank for lora/qlora
@@ -516,11 +530,10 @@ def main(
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules = "all", # If 'none', uses peft defaults. Use 'all' for our best guess for mistral+llama
     verbose: bool_arg = True, # Whether to print extra info for debugging
-    lr: float = 1e-4, # Learning rate
+    lr: float = 1e-5, # Learning rate
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adadelta", # adam, sgd or adadelta
     log_to: str = "stdout", # wandb or stdout
-    log_every_n_steps: int = 10, # How frequently to log loss
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
@@ -540,6 +553,8 @@ def main(
         args["lora_target_modules"] = ["k_proj", "q_proj", "v_proj", "up_proj", "down_proj", "gate_proj"]
     elif lora_target_modules.lower() == "none":
         args["lora_target_modules"] = None
+
+    torch.manual_seed(42)
 
     # Run
     mp.spawn(fsdp_main,
