@@ -206,16 +206,12 @@ def fsdp_main(rank, world_size, args):
         torch_dtype = torch.float16
         compute_dtype = torch.float16
     elif args["model_dtype"] == "bf16":
-        if not torch.cuda.is_bf16_supported():
-            raise ValueError('Current device does not support bfloat16')
         torch_dtype = torch.bfloat16
         compute_dtype = torch.bfloat16
     elif args["model_dtype"] == "fp32":
         torch_dtype = torch.float32
         compute_dtype = torch.float16
     elif args["model_dtype"] == "amp_bf16":
-        if not torch.cuda.is_bf16_supported():
-            raise ValueError('Current device does not support bfloat16')
         torch_dtype = torch.bfloat16
         compute_dtype = torch.bfloat16
         mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
@@ -423,6 +419,7 @@ def fsdp_main(rank, world_size, args):
             for param in group['params']:
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
+    gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
 
     # Train loop
     init_start_event.record()
@@ -451,6 +448,9 @@ def fsdp_main(rank, world_size, args):
             )
             loss = output.loss
 
+            # Scale loss for gradient accumulation
+            loss = loss / gradient_accumulation_steps
+
             # Log memory usage
             if batch_idx==0: args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
@@ -463,7 +463,7 @@ def fsdp_main(rank, world_size, args):
             ddp_loss[1] += bs
 
             # Step the optimizer (w/ gradient accumulation)
-            if batch_idx%args['gradient_accumulation_steps']==0:
+            if batch_idx % gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -485,7 +485,7 @@ def fsdp_main(rank, world_size, args):
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
             # Log loss every gradient update steps
-            if batch_idx%args['gradient_accumulation_steps']==0:
+            if batch_idx % gradient_accumulation_steps == 0:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
@@ -553,6 +553,9 @@ def main(
         args["lora_target_modules"] = ["k_proj", "q_proj", "v_proj", "up_proj", "down_proj", "gate_proj"]
     elif lora_target_modules.lower() == "none":
         args["lora_target_modules"] = None
+
+    if args["model_dtype"] in ["amp_bf16", "bf16"] and not torch.cuda.is_bf16_supported():
+        raise ValueError('Current device does not support bfloat16')
 
     torch.manual_seed(42)
 
