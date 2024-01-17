@@ -59,10 +59,14 @@ GC_LAYER_CLASS = LlamaDecoderLayer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # For logging things during training
-import wandb
+try:
+    import wandb
+except ImportError:
+    pass
+
 class Logger:
-    def __init__(self, args, log_every_n_steps=10, log_to="stdout", project_name="fsdp", rank=0):
-        self.log_every_n_steps = log_every_n_steps
+    def __init__(self, args, log_to="stdout", project_name="fsdp", rank=0):
+        # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
@@ -194,7 +198,7 @@ def fsdp_main(rank, world_size, args):
     torch.cuda.set_device(rank)
 
     # Start logging
-    args["logger"] = Logger(args, log_every_n_steps=args["log_every_n_steps"], log_to=args["log_to"], rank=rank)
+    args["logger"] = Logger(args, log_to=args["log_to"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
