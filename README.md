@@ -8,10 +8,12 @@ This is still a work-in-progress, but to start experimenting:
 - Run with defaults: `python train.py`!
 
 ## Testing from a fresh jarvislabs/runpod instance:
+These instructions have also been tested with Cuda 11.7 & 12.1.
+
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
 - `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes`
 - `pip uninstall bitsandbytes`
-- Clone https://github.com/AnswerDotAI/bitsandbytes + change into cuda_fix_quant_storage_dtype branch
+- Clone AnswerDotAI/bitsandbytes & switch to `cuda_fix_quant_storage_dtype` branch `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
 - in bitsandbytes folder, `make CUDA_VERSION=118` then `python setup.py install` (may need export BNB_CUDA_VERSION=118 and to set cuda path)
 - pip install fastcore wandb
 - huggingface-cli login (to access Llama 2 7B)
