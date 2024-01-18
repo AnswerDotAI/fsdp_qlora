@@ -234,6 +234,7 @@ def fsdp_main(rank, world_size, args):
     # limited qlora testing shows that mp_fp16 only works with autocast while mp_bf16 trains with both pure and autocast modes.
     # TODO: test how often this holds for mp_fp16
     mp_policy = None
+    quant_storage = None
     if args["precision"] == "bf16":
         torch_dtype = torch.bfloat16
         compute_dtype = torch.bfloat16
@@ -253,6 +254,14 @@ def fsdp_main(rank, world_size, args):
             # this setting should match the default PyTorch bf16 AMP behavior
             torch_dtype = torch.float32
             mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
+        elif args["mixed_precision_mode"] == "autocast_bf16":
+            # 1) Use full precision for the autocast listed ops, like reductions.
+            # 2) Decrease the peak memory of unsharded weights by using low precision param dtype, see 4.4 in FSDP paper.
+            # 3) Keep buffer in full precision for ROPE.
+            # https://github.com/pytorch/pytorch/issues/105348#issuecomment-1645615470
+            torch_dtype = torch.float32
+            quant_storage = torch.bfloat16 # keep same dtype as FSDP param_dtype to not break quantization.
+            mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
         else:
             raise ValueError("Invalid mixed_precision_mode")
     else:
@@ -332,7 +341,7 @@ def fsdp_main(rank, world_size, args):
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
             model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                         quant_type='nf4', quant_storage=torch_dtype)
+                                         quant_type='nf4', quant_storage=torch_dtype if quant_storage is None else quant_storage)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
