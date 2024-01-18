@@ -13,16 +13,18 @@ Not all combinations of arguments will work. See the accompanying blog post for 
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy
+import torch, os, gc, time, safetensors, copy, math
 import functools
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
+from transformers.optimization import get_linear_schedule_with_warmup, get_constant_schedule
 import bitsandbytes as bnb
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from contextlib import nullcontext
 
 # Argument parsing
-from fastcore.script import call_parse, bool_arg
+from fastcore.script import call_parse, bool_arg, Param
 
 # Torch + distributed training
 from torch import nn, Tensor
@@ -188,6 +190,26 @@ class InstructionDataset(Dataset):
             "labels": labels.tolist(),
             "attention_mask":example_mask.tolist(),
         }
+        
+# LR scheduler.
+def _get_cosine_one_cycle_lr_lambda(
+    current_step: int, *, num_warmup_steps: int, num_training_steps: int, min_lr_fraction = 0.1,
+):
+    if current_step < num_warmup_steps:
+        return float(current_step) / float(max(1, num_warmup_steps))  
+    scale_term = (1 - min_lr_fraction)
+    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+    return (math.cos(math.pi * progress)+1) * 0.5 * scale_term + min_lr_fraction
+
+def get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1):
+    "A more general cosine scheduler with to control the minimum learning rate"
+    lr_lambda = functools.partial(
+        _get_cosine_one_cycle_lr_lambda,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        min_lr_fraction=min_lr_fraction
+    )
+    return LambdaLR(optimizer, lr_lambda, last_epoch=-1) 
 
 # Main function, run on each process
 def fsdp_main(rank, world_size, args):
@@ -425,7 +447,17 @@ def fsdp_main(rank, world_size, args):
     elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
     else: raise ValueError("Invalid optimizer")
 
-    # LR scheduler TODO
+    # LR scheduler.
+    num_training_steps = args['num_epochs'] * len(dataloader) // args['gradient_accumulation_steps']
+    num_warmup_steps = int(num_training_steps * 0.1)
+    if args['lr_scheduler'] == "linear":
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
+    elif args['lr_scheduler'] == "cosine":
+        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1)
+    elif args['lr_scheduler'] == "constant":
+        lr_scheduler = get_constant_schedule(optimizer)    
+    else:
+        raise NotImplementedError("Constant LR scheduler not implemented yet")
 
     # Sanity check: see what parameters the optimizer has and which require grad:
     if rank == 0 and args['verbose']:
@@ -493,7 +525,7 @@ def fsdp_main(rank, world_size, args):
             if batch_idx % gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-
+                lr_scheduler.step()
             # Log memory usage after backwards
             if batch_idx==0: args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
@@ -516,6 +548,7 @@ def fsdp_main(rank, world_size, args):
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
+                args["logger"].log({"lr": lr_scheduler.get_last_lr()[0]}, rank)
 
     # Synchronize at the end and record time
     dist.barrier()
@@ -561,6 +594,7 @@ def main(
     lr: float = 1e-5, # Learning rate
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adadelta", # adam, sgd or adadelta
+    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
     log_to: str = "stdout", # wandb or stdout
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
     master_addr: str = "localhost", # For distributed training
