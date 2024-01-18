@@ -20,6 +20,7 @@ import bitsandbytes as bnb
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from contextlib import nullcontext
+from safetensors.torch import save_file
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg
@@ -35,6 +36,7 @@ from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as F
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
     CheckpointImpl,
@@ -533,6 +535,19 @@ def fsdp_main(rank, world_size, args):
     # End logging
     args["logger"].finish(rank=rank)
 
+    # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
+    if args["save_model"]:
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+            cpu_state_dict = model.state_dict()
+            os.makedirs(args["output_dir"], exist_ok=True)
+            if rank==0:
+                print("Saving model")
+                save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
+                print("Done", rank)
+
+    dist.barrier() # Stop other processes ending while model saving - probably not needed?
+
     # Clean up
     dist.destroy_process_group()
 
@@ -552,6 +567,7 @@ def main(
     precision: str = "bf16", # bf16, fp32, mp_bf16, or mp_fp16. mp_bf16 and mp_fp16 enable mixed precision, see mixed_precision_mode for more mp_bf16 options.
     mixed_precision_mode: str = "pure", # pure or autocast. If pure, FSDP parameters, gradient comms, & buffers are all bf16. If autocast they are fp32, autocasting during forward pass. Only applies for mp_bf16. mp_fp16 always autocasts.
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    save_model: bool_arg = False, # Whether to save the resulting model TODO
     output_dir: str = "output", # Output directory to save results to TODO
     lora_rank: int = 8, # LoRA rank for lora/qlora
     lora_alpha: int = 32, # LoRA alpha for lora/qlora
