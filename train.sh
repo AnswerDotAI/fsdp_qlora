@@ -1,6 +1,8 @@
 # Compare LORA and QLORA on Alpaca dataset with same effective batch size ~32, lr sched, and lr.
 
 # LORA (pure bf16)
+# https://wandb.ai/answerdotai/fsdp/runs/gb34o6p4?workspace=user-k-answer-ai
+# NOTE: Loss curve is flat - 1) use lower lr ? 2) start immediate annealing get_cosine_one_cycle_scheduler(..., min_lr_fraction=0.0)
 python train.py \
 --model_name meta-llama/Llama-2-7b-hf \
 --lr 1e-5 \
