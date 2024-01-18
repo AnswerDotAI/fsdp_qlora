@@ -486,6 +486,7 @@ def fsdp_main(rank, world_size, args):
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
 
     # Train loop
+    if rank == 0: print("Total Training Steps:", num_training_steps)
     init_start_event.record()
     for epoch in range(args['num_epochs']):
         model.train()
@@ -534,7 +535,8 @@ def fsdp_main(rank, world_size, args):
             if batch_idx % gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                lr_scheduler.step()
+                # lr_scheduler.step() # didn't give correct plot in wandb for some reason.
+            lr_scheduler.step() # this gives correct plot in wandb.
             # Log memory usage after backwards
             if batch_idx==0: args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
@@ -635,7 +637,7 @@ def main(
     if args["precision"] == "mp_fp16":
         args["mixed_precision_mode"] = "autocast"
 
-    if args["mixed_precision_mode"] not in ["pure", "autocast"]:
+    if args["mixed_precision_mode"] not in ["pure", "autocast", "autocast_bf16"]:
         raise ValueError('Invalid mixed_precision_mode')
 
     torch.manual_seed(42)
