@@ -50,6 +50,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from safetensors import safe_open
 from bitsandbytes.nn import Linear4bit, Params4bit
 from accelerate import init_empty_weights
+from accelerate.utils import set_seed
 from peft import get_peft_model, LoraConfig, TaskType
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
@@ -634,7 +635,10 @@ def main(
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
+    seed: int = 42, # Random seed
 ):
+    set_seed(args['seed'])
+    
     # Set world size
     if world_size == -1:
         world_size = torch.cuda.device_count()
