@@ -23,6 +23,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from contextlib import nullcontext
 from safetensors.torch import save_file
+from tqdm.auto import tqdm
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
@@ -456,19 +457,21 @@ def fsdp_main(rank, world_size, args):
     if args["optimizer"] == "adam": optimizer = optim.Adam(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "sgd": optimizer = optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
+    elif args["optimizer"] == "adamw": torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)      
     else: raise ValueError("Invalid optimizer")
 
     # LR scheduler.
-    num_training_steps = args['num_epochs'] * len(dataloader) // args['gradient_accumulation_steps']
-    num_warmup_steps = int(num_training_steps * 0.1)
+    num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
+    num_scheduler_steps = num_training_steps * dist.get_world_size()
+    num_warmup_steps = int(num_scheduler_steps * 0.1)
     if args['lr_scheduler'] == "linear":
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_scheduler_steps)
     elif args['lr_scheduler'] == "cosine":
-        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1)
+        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
     elif args['lr_scheduler'] == "constant":
         lr_scheduler = get_constant_schedule(optimizer)    
     else:
-        raise NotImplementedError("Constant LR scheduler not implemented yet")
+        raise NotImplementedError(f"{args['lr_scheduler']} LR scheduler not implemented yet")
 
     # Sanity check: see what parameters the optimizer has and which require grad:
     if rank == 0 and args['verbose']:
@@ -488,6 +491,8 @@ def fsdp_main(rank, world_size, args):
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
 
     # Train loop
+    # TODO: no_sync() is needed to accumulate gradients with cpu offloading.
+    progress_bar = tqdm(range(args.max_train_steps), disable=rank != 0)
     if rank == 0: print("Total Training Steps:", num_training_steps)
     init_start_event.record()
     for epoch in range(args['num_epochs']):
@@ -535,10 +540,12 @@ def fsdp_main(rank, world_size, args):
 
             # Step the optimizer (w/ gradient accumulation)
             if batch_idx % gradient_accumulation_steps == 0:
+                if args['grad_norm'] is not None:
+                    model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
                 optimizer.step()
                 optimizer.zero_grad()
-                # lr_scheduler.step() # didn't give correct plot in wandb for some reason.
-            lr_scheduler.step() # this gives correct plot in wandb.
+                lr_scheduler.step()
+                progress_bar.update(1)
             # Log memory usage after backwards
             if batch_idx==0: args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
@@ -613,14 +620,15 @@ def main(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model TODO
     output_dir: str = "output", # Output directory to save results to TODO
-    lora_rank: int = 8, # LoRA rank for lora/qlora
-    lora_alpha: int = 32, # LoRA alpha for lora/qlora
+    lora_rank: int = 64, # LoRA rank for lora/qlora
+    lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules = "all", # If 'none', uses peft defaults. Use 'all' for our best guess for mistral+llama
     verbose: bool_arg = True, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
+    grad_norm: float = 0.3, # Gradient norm clipping
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
-    optimizer: str = "adadelta", # adam, sgd or adadelta
+    optimizer: str = "adamw", # adam, sgd or adadelta
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
     log_to: str = "stdout", # wandb or stdout
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
