@@ -457,8 +457,10 @@ def fsdp_main(rank, world_size, args):
     if args["optimizer"] == "adam": optimizer = optim.Adam(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "sgd": optimizer = optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adamw": torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)      
+    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)      
     else: raise ValueError("Invalid optimizer")
+
+    gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
 
     # LR scheduler.
     num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
@@ -488,11 +490,9 @@ def fsdp_main(rank, world_size, args):
     scaler = ShardedGradScaler() if args["precision"] == "mp_fp16" else None
     scale_loss = scaler is not None
 
-    gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
-
     # Train loop
     # TODO: no_sync() is needed to accumulate gradients with cpu offloading.
-    progress_bar = tqdm(range(args.max_train_steps), disable=rank != 0)
+    progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     if rank == 0: print("Total Training Steps:", num_training_steps)
     init_start_event.record()
     for epoch in range(args['num_epochs']):

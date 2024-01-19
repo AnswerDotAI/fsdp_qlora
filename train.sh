@@ -15,7 +15,8 @@ python train.py \
 --log_to wandb \
 --dataset alpaca \
 --verbose false \
---output_dir models/lora_alpaca
+--save_model true \
+--output_dir ~/models/lora_alpaca
 
 # QLORA (pure bf16)
 python train.py \
@@ -30,7 +31,8 @@ python train.py \
 --log_to wandb \
 --dataset alpaca \
 --verbose false \
---output_dir models/qlora_alpaca
+--save_model true \
+--output_dir ~/models/qlora_alpaca
 
 # QLORA (autocast bf16)
 python train.py \
@@ -46,10 +48,11 @@ python train.py \
 --log_to wandb \
 --dataset alpaca \
 --verbose false \
---output_dir models/qlora_alpaca_autocast_bf16
+--save_model true \
+--output_dir ~/models/qlora_alpaca_autocast_bf16
 
 # stop instance
-az vm deallocate --name a100-duo
+az vm deallocate -g resource-group-us-east -n a100-duo
 
 
 
