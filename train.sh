@@ -14,7 +14,8 @@ python train.py \
 --use_cpu_offload False \
 --log_to wandb \
 --dataset alpaca \
---verbose false
+--verbose false \
+--output_dir models/lora_alpaca
 
 # QLORA (pure bf16)
 python train.py \
@@ -28,7 +29,8 @@ python train.py \
 --use_cpu_offload False \
 --log_to wandb \
 --dataset alpaca \
---verbose false
+--verbose false \
+--output_dir models/qlora_alpaca
 
 # QLORA (autocast bf16)
 python train.py \
@@ -43,10 +45,11 @@ python train.py \
 --use_cpu_offload False \
 --log_to wandb \
 --dataset alpaca \
---verbose false
+--verbose false \
+--output_dir models/qlora_alpaca_autocast_bf16
 
-
-
+# stop instance
+az vm deallocate --name a100-duo
 
 
 
