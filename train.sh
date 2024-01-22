@@ -37,7 +37,7 @@ python train.py \
 # QLORA (autocast bf16)
 python train.py \
 --model_name meta-llama/Llama-2-7b-hf \
---mixed_precision_mode autocast_bf16 \
+--mp_bf16_mode mixed \
 --gradient_accumulation_steps 2 \
 --batch_size 8 \
 --context_length 512 \
