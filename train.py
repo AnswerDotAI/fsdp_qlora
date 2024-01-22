@@ -664,8 +664,6 @@ def main(
     if args["precision"] == "mp_bf16" and args["mp_bf16_mode"] not in ["pure", "autocast", "mixed"]:
         raise ValueError('Invalid mp_bf16_mode for `precision=mp_bf16`')
 
-    torch.manual_seed(42)
-
     # Run
     mp.spawn(fsdp_main,
         args=(world_size, args),
