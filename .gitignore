@@ -3,3 +3,4 @@ output
 .ipynb_checkpoints
 nbs/profile_snapshots
 **/*checkpoint.ipynb
+**/*.log

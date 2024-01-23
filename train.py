@@ -369,7 +369,7 @@ def fsdp_main(rank, world_size, args):
             for filename in files:
                 weights = safetensors.torch.load_file(filename)
                 for name, param in weights.items():
-                    load_param(model, name, param, dtype=torch.bfloat16, device=rank)
+                    load_param(model, name, param, dtype=torch_dtype, device=rank)
         model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
@@ -436,17 +436,25 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    print("Buffers dtype", next(model.buffers()).dtype)
-    print("Params dtype", next(model.parameters()).dtype)
+    print(model)
+    print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
+    print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
+    print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
     print("Model Mixed precision", model.mixed_precision.param_dtype)
     print("LORA Mixed precision", model.mixed_precision.param_dtype)    
     # import pdb; pdb.set_trace()
     decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    print("Decoder layer mp", decoder_layer.mixed_precision.param_dtype)
-    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
-    print("LORA layer mp", lora_layer.mixed_precision.param_dtype)
-    print(decoder_layer)
+    print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
+    print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
+    print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
+    from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
+    print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
     
+    
+    
+    # return
     # Synchronize at the start
     dist.barrier()
 
