@@ -127,20 +127,21 @@ def clear_gpu_cache(rank=None):
 
 def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None):
     value = value.to(device=device, dtype=dtype)
-
     module_key, _, value_key = name.rpartition('.')
-    submodule = module.get_submodule(module_key)
     try:
-        param = submodule.get_parameter(value_key)
-        if isinstance(param, Params4bit):
-            value = type(param)(value.data, **param.__dict__)
-            value.cuda(device) # Terrible and wrong passing in rank for now hack
-        else:
-            value = type(param)(value.data)
-    except AttributeError:
-        pass  # it's a buffer
-    setattr(submodule, value_key, value)
-
+        submodule = module.get_submodule(module_key)
+        try:
+            param = submodule.get_parameter(value_key)
+            if isinstance(param, Params4bit):
+                value = type(param)(value.data, **param.__dict__)
+                value.cuda(device) # Terrible and wrong passing in rank for now hack
+            else:
+                value = type(param)(value.data)
+        except AttributeError:
+            pass  # it's a buffer
+        setattr(submodule, value_key, value)
+    except:
+        print(f"Module {module_key} not found")
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -341,6 +342,7 @@ def fsdp_main(rank, world_size, args):
     elif args["train_type"] == "qlora": # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
+        # cfg.update(get_model_size_config("DEBUG"))
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -434,6 +436,17 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
+    print("Buffers dtype", next(model.buffers()).dtype)
+    print("Params dtype", next(model.parameters()).dtype)
+    print("Model Mixed precision", model.mixed_precision.param_dtype)
+    print("LORA Mixed precision", model.mixed_precision.param_dtype)    
+    # import pdb; pdb.set_trace()
+    decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
+    print("Decoder layer mp", decoder_layer.mixed_precision.param_dtype)
+    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    print("LORA layer mp", lora_layer.mixed_precision.param_dtype)
+    print(decoder_layer)
+    
     # Synchronize at the start
     dist.barrier()
 
@@ -484,7 +497,7 @@ def fsdp_main(rank, world_size, args):
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
     # Autocast for mixed precision with fp16/bf16 compute types with fp32 params
-    if args["precision"] == "mp_fp16" or (args["precision"] == "mp_bf16" and args["mp_bf16_mode"] == "autocast"):
+    if args["precision"] == "mp_fp16" or (args["precision"] == "mp_bf16" and args["mp_bf16_mode"] in ["autocast", "mixed"]):
         autocast = torch.cuda.amp.autocast(enabled=True, dtype=compute_dtype)
     else:
         autocast = nullcontext()
@@ -637,7 +650,6 @@ def main(
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
 ):
-    set_seed(args['seed'])
 
     # Set world size
     if world_size == -1:
@@ -646,6 +658,7 @@ def main(
 
     # Get all args which will be passed to fsdp_main
     args = dict(locals())
+    set_seed(args['seed'])
     if args['verbose']: print(args)
 
     # If lora_target_modules is 'all', set sensible defaults for llama + mistral type modules

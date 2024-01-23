@@ -54,6 +54,21 @@ python train.py \
 # stop instance
 az vm deallocate -g resource-group-us-east -n a100-duo
 
+# # DEBUG
+# python train.py \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --precision mp_bf16 \
+# --mp_bf16_mode mixed \
+# --gradient_accumulation_steps 2 \
+# --batch_size 8 \
+# --num_epochs 1 \
+# --train_type qlora \
+# --use_gradient_checkpointing False \
+# --use_cpu_offload False \
+# --dataset dummy \
+# --verbose false \
+# --context_length 128
+
 
 
 
