@@ -310,6 +310,7 @@ def fsdp_main(rank, world_size, args):
 
 
     # Create model
+    use_flash_attn = args['use_flash_attention']
     print("Creating model", rank)
     if args["train_type"] == "full" or args["train_type"] == "lora": # Full version
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
@@ -317,11 +318,13 @@ def fsdp_main(rank, world_size, args):
                 args["model_name"],
                 use_cache=False,
                 torch_dtype=torch_dtype,
+                _attn_implementation="flash_attention_2" if use_flash_attn else "eager"
             )
             model.to(rank).to(torch_dtype)
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
+            cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "eager"
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg)
             model.to(torch_dtype)
@@ -336,12 +339,14 @@ def fsdp_main(rank, world_size, args):
         model = AutoModelForCausalLM.from_pretrained(
             args["model_name"],
             use_cache=False,
-            quantization_config=bnb_config
+            quantization_config=bnb_config,
+            _attn_implementation="flash_attention_2" if use_flash_attn else "eager"
         )
 
     elif args["train_type"] == "qlora": # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
+        cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "eager"
         # cfg.update(get_model_size_config("DEBUG"))
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -479,7 +484,8 @@ def fsdp_main(rank, world_size, args):
     if args["optimizer"] == "adam": optimizer = optim.Adam(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "sgd": optimizer = optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)
+    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], 
+                                                                     betas=(0.9,0.95), eps=1e-5, weight_decay=args['wd'])
     else: raise ValueError("Invalid optimizer")
 
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -634,6 +640,7 @@ def main(
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
+    use_flash_attention: bool_arg = False, # Whether to use flash attention
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
@@ -649,6 +656,7 @@ def main(
     verbose: bool_arg = True, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     grad_norm: float = 0.3, # Gradient norm clipping
+    wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adamw", # adam, sgd or adadelta
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use

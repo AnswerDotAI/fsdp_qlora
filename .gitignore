@@ -4,3 +4,4 @@ output
 nbs/profile_snapshots
 **/*checkpoint.ipynb
 **/*.log
+nbs/tmp-*
