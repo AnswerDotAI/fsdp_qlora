@@ -125,11 +125,15 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None):
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[]):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
     try:
         submodule = module.get_submodule(module_key)
+        print(f"Loading {name} into {module_key}")
+        if any([skip_name in name for skip_name in skip_names]):
+            print(f"Skipping {name} because it is in skip_names")
+            return
         try:
             param = submodule.get_parameter(value_key)
             if isinstance(param, Params4bit):
@@ -236,39 +240,29 @@ def fsdp_main(rank, world_size, args):
     # model precision, qlora compute precison, and FSDP mixed precision policy.
     # The Linear4Bit quant_storage dtype should always match the FSDP param_dtype. The compute_dtype should match the AMP compute dtype.
     # MixedPrecision(param_dtype=fp32, reduce_dtype=fp32, buffer_dtype=fp32) uses `torch.amp.autocast` to control precision.
-    # limited qlora testing shows that mp_fp16 only works with autocast while mp_bf16 trains with both pure and autocast modes.
+    # limited qlora testing shows that fp16 only works with autocast while bf16 trains with both pure and autocast modes.
     # TODO: test how often this holds for mp_fp16
     mp_policy = None
-    quant_storage = None
+    load_param_skip_names = []
     if args["precision"] == "bf16":
         torch_dtype = torch.bfloat16
         compute_dtype = torch.bfloat16
     elif args["precision"] == "fp32":
         torch_dtype = torch.float32
         compute_dtype = torch.float16
-    elif args["precision"] == "mp_fp16":
+    elif args["precision"] == "fp16_autocast":
         compute_dtype = torch.float16
         torch_dtype = torch.float32
         mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-    elif args["precision"] == "mp_bf16":
+    elif args["precision"] == "bf16_autocast":
         compute_dtype = torch.bfloat16
-        if args["mp_bf16_mode"] == "pure":
-            torch_dtype = torch.bfloat16
-            mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
-        elif args["mp_bf16_mode"] == "autocast":
-            # this setting should match the default PyTorch bf16 AMP behavior
-            torch_dtype = torch.float32
-            mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-        elif args["mp_bf16_mode"] == "mixed":
-            # 1) Use full precision for the autocast listed ops, like reductions.
-            # 2) Decrease the peak memory of unsharded weights by using low precision param dtype, see 4.4 in FSDP paper.
-            # 3) Keep buffer in full precision for ROPE.
-            # https://github.com/pytorch/pytorch/issues/105348#issuecomment-1645615470
-            torch_dtype = torch.float32
-            quant_storage = torch.bfloat16 # keep same dtype as FSDP param_dtype to not break quantization.
-            mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
-        else:
-            raise ValueError("Invalid mp_bf16_mode")
+        torch_dtype = torch.float32
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)    
+    elif args["precision"] == "bf16_buffers_autocast":
+        compute_dtype = torch.bfloat16
+        torch_dtype = torch.bfloat16
+        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
+        load_param_skip_names = ['inv_freq']
     else:
         raise ValueError("Invalid precision")
 
@@ -348,12 +342,12 @@ def fsdp_main(rank, world_size, args):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
-        # cfg.update(get_model_size_config("DEBUG"))
+        # cfg.update(dict(num_hidden_layers=2)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
             model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                         quant_type='nf4', quant_storage=torch_dtype if quant_storage is None else quant_storage)
+                                         quant_type='nf4', quant_storage=torch_dtype)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
@@ -375,8 +369,7 @@ def fsdp_main(rank, world_size, args):
             for filename in files:
                 weights = safetensors.torch.load_file(filename)
                 for name, param in weights.items():
-                    load_param(model, name, param, dtype=torch_dtype, device=rank)
-        model.to(torch_dtype)
+                    load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -514,11 +507,11 @@ def fsdp_main(rank, world_size, args):
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
     # Autocast for mixed precision with fp16/bf16 compute types with fp32 params
-    if args["precision"] == "mp_fp16" or (args["precision"] == "mp_bf16" and args["mp_bf16_mode"] in ["autocast", "mixed"]):
+    if args["precision"] in ["fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]:
         autocast = torch.cuda.amp.autocast(enabled=True, dtype=compute_dtype)
     else:
         autocast = nullcontext()
-    scaler = ShardedGradScaler() if args["precision"] == "mp_fp16" else None
+    scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
     scale_loss = scaler is not None
 
     # Train loop
@@ -648,8 +641,7 @@ def main(
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
-    precision: str = "bf16", # bf16, fp32, mp_bf16, or mp_fp16. mp_bf16 and mp_fp16 enable mixed precision. mp_fp16 always uses amp.autocast. see mp_bf16_mode for more mp_bf16 options.
-    mp_bf16_mode: str = "pure", # pure, mixed, or autocast. Only applies if `precision=mp_bf16`. If pure, FSDP `MixedPrecision` parameters, gradient comms, & buffers are all bf16. If mixed, FSDP buffers are fp32, parameters & comms are bf16. If autocast all are fp32, using amp.autocast during forward pass.
+    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model TODO
     output_dir: str = "output", # Output directory to save results to TODO
@@ -688,14 +680,8 @@ def main(
     elif lora_target_modules.lower() == "none":
         args["lora_target_modules"] = None
 
-    if args["precision"] not in ["bf16", "fp32", "mp_bf16", "mp_fp16"]:
-        raise ValueError('Invalid precision')
-
-    if args["precision"] in ["mp_bf16", "bf16"] and not torch.cuda.is_bf16_supported():
+    if args["precision"] in ["bf16", "bf16_autocast", "bf16_buffers_autocast"] and not torch.cuda.is_bf16_supported():
         raise ValueError('Current device does not support bfloat16')
-
-    if args["precision"] == "mp_bf16" and args["mp_bf16_mode"] not in ["pure", "autocast", "mixed"]:
-        raise ValueError('Invalid mp_bf16_mode for `precision=mp_bf16`')
 
     # Run
     mp.spawn(fsdp_main,
