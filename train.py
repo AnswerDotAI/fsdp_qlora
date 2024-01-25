@@ -37,7 +37,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # FSDP
 from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload
+from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload, ShardingStrategy
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -281,7 +281,8 @@ def fsdp_main(rank, world_size, args):
     if args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
+        # dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:4096]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*16,
@@ -426,8 +427,10 @@ def fsdp_main(rank, world_size, args):
         my_auto_wrap_policy = functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
 
     print("Wrapping model w/ FSDP", rank)
+    sharding_strategy = ShardingStrategy.FULL_SHARD if not args['use_ddp'] else ShardingStrategy.NO_SHARD
     model = FSDP(
         model,
+        sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
         use_orig_params=False,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
@@ -640,6 +643,7 @@ def main(
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
+    use_ddp: bool_arg = False, # Whether to use DDP instead of FSDP with full sharding
     use_flash_attention: bool_arg = False, # Whether to use flash attention
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
