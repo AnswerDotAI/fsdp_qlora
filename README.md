@@ -33,11 +33,11 @@ NBs:
 
 ### `--precision bf16` (pure bfloat16)
 
-This will cast all the model parameters to `torch.bfloat16` before training and won't use FSDP mixed precision. As a results, sharded and unsharded params will be stored in bf16, forward and backward passes will be done in bf16, and gradient reduction and updates will also be done in bf16.
+This will cast all the model parameters to `torch.bfloat16` before training and won't use FSDP mixed precision. As a result, sharded and unsharded params will be stored in bf16, forward and backward passes will be done in bf16, and gradient reduction and updates will be done in bf16.
 
 ### `--precision fp32` (pure float32)
 
-This will cast all the model parameters to `torch.float32` before training and won't use FSDP mixed precision. As a results, sharded and unsharded params will be stored in fp32, forward and backward passes will be done in fp32, and gradient reduction and updates will also be done in fp32.
+This will cast all the model parameters to `torch.float32` before training and won't use FSDP mixed precision. As a result, sharded and unsharded params will be stored in fp32, forward and backward passes will be done in fp32, and gradient reduction and updates will be done in fp32.
 
 
 ### `--precision mp_fp16_autocast` (mixed float16 with autocast)
