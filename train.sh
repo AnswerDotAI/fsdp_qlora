@@ -54,18 +54,3 @@ python train.py \
 # stop instance
 # requires: az login --use-device-code
 az vm deallocate -g resource-group-us-east -n a100-duo
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

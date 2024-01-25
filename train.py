@@ -429,21 +429,21 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    print(model)
-    print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
-    print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
-    print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
-    print("Model Mixed precision", model.mixed_precision.param_dtype)
-    print("LORA Mixed precision", model.mixed_precision.param_dtype)    
-    # import pdb; pdb.set_trace()
-    decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
-    print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
-    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
-    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
-    print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
-    from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
-    print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
+    # print(model)
+    # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
+    # print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
+    # print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
+    # print("Model Mixed precision", model.mixed_precision.param_dtype)
+    # print("LORA Mixed precision", model.mixed_precision.param_dtype)    
+    # # import pdb; pdb.set_trace()
+    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
+    # print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
+    # print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
+    # # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
+    # print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
+    # from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
+    # print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
     
     
     
