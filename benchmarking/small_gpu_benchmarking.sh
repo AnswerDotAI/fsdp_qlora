@@ -1,32 +1,49 @@
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --use_dpp --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --use_dpp --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --use_dpp --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --use_dpp --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload --train_type qlora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type lora
-python train.py --batch_size 128 --num_epochs 1 --dataset alpaca_sample --use_flash_attention --precision bf16_buffers_autocast --log_to wandb --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload --train_type qlora
+# Run for 1 fwd-bwd step to find the max bs using a 2xA5000 (24GB each) machine.
+
+# Fine.
+python train.py --batch_size 48 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
+# Check why bs is very low in qlora vs lora? Activation overhead?
+python train.py --batch_size 24 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+# How is qlora full shard same as ddp?
+python train.py --batch_size 24 --use_ddp True --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+# Extremely slow.
+python train.py --batch_size 96 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
+# Same as before -> Check why bs is very low in qlora vs lora? Activation overhead?
+python train.py --batch_size 30 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
+python train.py --batch_size 4 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
+# Now that bs drops (or activations) we can use larger bs than lora.
+python train.py --batch_size 6 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+# Again -> How is qlora full shard same as ddp?
+python train.py --batch_size 6 --use_ddp True --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+# Again -> Extremely slow also much lower bs than grad ckpt. Probably smart to prefer grad ckpt over cpu offload.
+python train.py --batch_size 8 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
+# Interesting now lora and qlora have same bs when grad ckpt disabled with cpu offloading.
+python train.py --batch_size 8 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
+
+
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+python train.py --batch_size 128 --use_ddp True --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+python train.py --batch_size 128 --use_ddp True --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-13b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
+
+
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --train_type lora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
+
+
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
+python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
