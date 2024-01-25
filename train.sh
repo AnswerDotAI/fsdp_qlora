@@ -37,7 +37,7 @@ python train.py \
 # QLORA (autocast bf16)
 python train.py \
 --model_name meta-llama/Llama-2-7b-hf \
---mixed_precision_mode autocast_bf16 \
+--precision bf16_buffers_autocast \
 --gradient_accumulation_steps 2 \
 --batch_size 8 \
 --context_length 512 \
@@ -49,7 +49,7 @@ python train.py \
 --dataset alpaca \
 --verbose false \
 --save_model true \
---output_dir ~/models/qlora_alpaca_autocast_bf16
+--output_dir ~/models/qlora_alpaca_autocast_buffers_bf16
 
 # stop instance
 # requires: az login --use-device-code

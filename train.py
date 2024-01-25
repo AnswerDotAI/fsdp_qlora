@@ -50,6 +50,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from safetensors import safe_open
 from bitsandbytes.nn import Linear4bit, Params4bit
 from accelerate import init_empty_weights
+from accelerate.utils import set_seed
 from peft import get_peft_model, LoraConfig, TaskType
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
@@ -124,22 +125,27 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None):
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[]):
     value = value.to(device=device, dtype=dtype)
-
     module_key, _, value_key = name.rpartition('.')
-    submodule = module.get_submodule(module_key)
     try:
-        param = submodule.get_parameter(value_key)
-        if isinstance(param, Params4bit):
-            value = type(param)(value.data, **param.__dict__)
-            value.cuda(device) # Terrible and wrong passing in rank for now hack
-        else:
-            value = type(param)(value.data)
-    except AttributeError:
-        pass  # it's a buffer
-    setattr(submodule, value_key, value)
-
+        submodule = module.get_submodule(module_key)
+        print(f"Loading {name} into {module_key}")
+        if any([skip_name in name for skip_name in skip_names]):
+            print(f"Skipping {name} because it is in skip_names")
+            return
+        try:
+            param = submodule.get_parameter(value_key)
+            if isinstance(param, Params4bit):
+                value = type(param)(value.data, **param.__dict__)
+                value.cuda(device) # Terrible and wrong passing in rank for now hack
+            else:
+                value = type(param)(value.data)
+        except AttributeError:
+            pass  # it's a buffer
+        setattr(submodule, value_key, value)
+    except:
+        print(f"Module {module_key} not found")
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -193,13 +199,13 @@ class InstructionDataset(Dataset):
             "labels": labels.tolist(),
             "attention_mask":example_mask.tolist(),
         }
-        
+
 # LR scheduler.
 def _get_cosine_one_cycle_lr_lambda(
     current_step: int, *, num_warmup_steps: int, num_training_steps: int, min_lr_fraction = 0.1,
 ):
     if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))  
+        return float(current_step) / float(max(1, num_warmup_steps))
     scale_term = (1 - min_lr_fraction)
     progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
     return (math.cos(math.pi * progress)+1) * 0.5 * scale_term + min_lr_fraction
@@ -212,7 +218,7 @@ def get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_ste
         num_training_steps=num_training_steps,
         min_lr_fraction=min_lr_fraction
     )
-    return LambdaLR(optimizer, lr_lambda, last_epoch=-1) 
+    return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 
 # Main function, run on each process
 def fsdp_main(rank, world_size, args):
@@ -233,40 +239,30 @@ def fsdp_main(rank, world_size, args):
 
     # model precision, qlora compute precison, and FSDP mixed precision policy.
     # The Linear4Bit quant_storage dtype should always match the FSDP param_dtype. The compute_dtype should match the AMP compute dtype.
-    # MixedPrecision(param_dtype=fp32, reduce_dtype=fp32, buffer_dtype=fp32) uses autocast to control precision.
-    # limited qlora testing shows that mp_fp16 only works with autocast while mp_bf16 trains with both pure and autocast modes.
+    # MixedPrecision(param_dtype=fp32, reduce_dtype=fp32, buffer_dtype=fp32) uses `torch.amp.autocast` to control precision.
+    # limited qlora testing shows that fp16 only works with autocast while bf16 trains with both pure and autocast modes.
     # TODO: test how often this holds for mp_fp16
     mp_policy = None
-    quant_storage = None
+    load_param_skip_names = []
     if args["precision"] == "bf16":
         torch_dtype = torch.bfloat16
         compute_dtype = torch.bfloat16
     elif args["precision"] == "fp32":
         torch_dtype = torch.float32
         compute_dtype = torch.float16
-    elif args["precision"] == "mp_fp16":
+    elif args["precision"] == "fp16_autocast":
         compute_dtype = torch.float16
         torch_dtype = torch.float32
         mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-    elif args["precision"] == "mp_bf16":
+    elif args["precision"] == "bf16_autocast":
         compute_dtype = torch.bfloat16
-        if args["mixed_precision_mode"] == "pure":
-            torch_dtype = torch.bfloat16
-            mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16)
-        elif args["mixed_precision_mode"] == "autocast":
-            # this setting should match the default PyTorch bf16 AMP behavior
-            torch_dtype = torch.float32
-            mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-        elif args["mixed_precision_mode"] == "autocast_bf16":
-            # 1) Use full precision for the autocast listed ops, like reductions.
-            # 2) Decrease the peak memory of unsharded weights by using low precision param dtype, see 4.4 in FSDP paper.
-            # 3) Keep buffer in full precision for ROPE.
-            # https://github.com/pytorch/pytorch/issues/105348#issuecomment-1645615470
-            torch_dtype = torch.float32
-            quant_storage = torch.bfloat16 # keep same dtype as FSDP param_dtype to not break quantization.
-            mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
-        else:
-            raise ValueError("Invalid mixed_precision_mode")
+        torch_dtype = torch.float32
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)    
+    elif args["precision"] == "bf16_buffers_autocast":
+        compute_dtype = torch.bfloat16
+        torch_dtype = torch.bfloat16
+        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
+        load_param_skip_names = ['inv_freq']
     else:
         raise ValueError("Invalid precision")
 
@@ -340,11 +336,12 @@ def fsdp_main(rank, world_size, args):
     elif args["train_type"] == "qlora": # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
+        # cfg.update(dict(num_hidden_layers=2)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
             model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                         quant_type='nf4', quant_storage=torch_dtype if quant_storage is None else quant_storage)
+                                         quant_type='nf4', quant_storage=torch_dtype)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
@@ -366,8 +363,7 @@ def fsdp_main(rank, world_size, args):
             for filename in files:
                 weights = safetensors.torch.load_file(filename)
                 for name, param in weights.items():
-                    load_param(model, name, param, dtype=torch.bfloat16, device=rank)
-        model.to(torch_dtype)
+                    load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -433,6 +429,25 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
+    print(model)
+    print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
+    print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
+    print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
+    print("Model Mixed precision", model.mixed_precision.param_dtype)
+    print("LORA Mixed precision", model.mixed_precision.param_dtype)    
+    # import pdb; pdb.set_trace()
+    decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
+    print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
+    print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
+    print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
+    from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
+    print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
+    
+    
+    
+    # return
     # Synchronize at the start
     dist.barrier()
 
@@ -457,7 +472,7 @@ def fsdp_main(rank, world_size, args):
     if args["optimizer"] == "adam": optimizer = optim.Adam(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "sgd": optimizer = optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)      
+    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), eps=1e-5)
     else: raise ValueError("Invalid optimizer")
 
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -471,7 +486,7 @@ def fsdp_main(rank, world_size, args):
     elif args['lr_scheduler'] == "cosine":
         lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
     elif args['lr_scheduler'] == "constant":
-        lr_scheduler = get_constant_schedule(optimizer)    
+        lr_scheduler = get_constant_schedule(optimizer)
     else:
         raise NotImplementedError(f"{args['lr_scheduler']} LR scheduler not implemented yet")
 
@@ -483,11 +498,11 @@ def fsdp_main(rank, world_size, args):
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
 
     # Autocast for mixed precision with fp16/bf16 compute types with fp32 params
-    if args["precision"] in ["mp_fp16", "mp_bf16"] and args["mixed_precision_mode"] == "autocast":
+    if args["precision"] in ["fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]:
         autocast = torch.cuda.amp.autocast(enabled=True, dtype=compute_dtype)
     else:
         autocast = nullcontext()
-    scaler = ShardedGradScaler() if args["precision"] == "mp_fp16" else None
+    scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
     scale_loss = scaler is not None
 
     # Train loop
@@ -615,8 +630,7 @@ def main(
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
-    precision: str = "bf16", # bf16, fp32, mp_bf16, or mp_fp16. mp_bf16 and mp_fp16 enable mixed precision, see mixed_precision_mode for more mp_bf16 options.
-    mixed_precision_mode: str = "pure", # pure or autocast. If pure, FSDP parameters, gradient comms, & buffers are all bf16. If autocast they are fp32, autocasting during forward pass. Only applies for mp_bf16. mp_fp16 always autocasts.
+    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model TODO
     output_dir: str = "output", # Output directory to save results to TODO
@@ -634,7 +648,9 @@ def main(
     wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
+    seed: int = 42, # Random seed
 ):
+
     # Set world size
     if world_size == -1:
         world_size = torch.cuda.device_count()
@@ -642,6 +658,7 @@ def main(
 
     # Get all args which will be passed to fsdp_main
     args = dict(locals())
+    set_seed(args['seed'])
     if args['verbose']: print(args)
 
     # If lora_target_modules is 'all', set sensible defaults for llama + mistral type modules
@@ -651,20 +668,8 @@ def main(
     elif lora_target_modules.lower() == "none":
         args["lora_target_modules"] = None
 
-    if args["precision"] not in ["bf16", "fp32", "mp_bf16", "mp_fp16"]:
-        raise ValueError('Invalid precision')
-
-    if args["precision"] in ["mp_bf16", "bf16"] and not torch.cuda.is_bf16_supported():
+    if args["precision"] in ["bf16", "bf16_autocast", "bf16_buffers_autocast"] and not torch.cuda.is_bf16_supported():
         raise ValueError('Current device does not support bfloat16')
-
-    # fp16 mixed precision appears to only train with autocast, so hardcoding here
-    if args["precision"] == "mp_fp16":
-        args["mixed_precision_mode"] = "autocast"
-
-    if args["mixed_precision_mode"] not in ["pure", "autocast", "autocast_bf16"]:
-        raise ValueError('Invalid mixed_precision_mode')
-
-    torch.manual_seed(42)
 
     # Run
     mp.spawn(fsdp_main,
