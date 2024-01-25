@@ -52,6 +52,7 @@ python train.py \
 --output_dir ~/models/qlora_alpaca_autocast_bf16
 
 # stop instance
+# requires: az login --use-device-code
 az vm deallocate -g resource-group-us-east -n a100-duo
 
 
