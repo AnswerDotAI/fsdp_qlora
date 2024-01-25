@@ -319,13 +319,13 @@ def fsdp_main(rank, world_size, args):
                 args["model_name"],
                 use_cache=False,
                 torch_dtype=torch_dtype,
-                _attn_implementation="flash_attention_2" if use_flash_attn else "eager"
+                _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
             )
             model.to(rank).to(torch_dtype)
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
-            cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "eager"
+            cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg)
             model.to(torch_dtype)
@@ -341,13 +341,13 @@ def fsdp_main(rank, world_size, args):
             args["model_name"],
             use_cache=False,
             quantization_config=bnb_config,
-            _attn_implementation="flash_attention_2" if use_flash_attn else "eager"
+            _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
         )
 
     elif args["train_type"] == "qlora": # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
-        cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "eager"
+        cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
         # cfg.update(get_model_size_config("DEBUG"))
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
