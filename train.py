@@ -125,27 +125,48 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[]):
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[], is_meta_rank:bool=False):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
     try:
         submodule = module.get_submodule(module_key)
-        print(f"Loading {name} into {module_key}")
-        if any([skip_name in name for skip_name in skip_names]):
-            print(f"Skipping {name} because it is in skip_names")
-            return
         try:
             param = submodule.get_parameter(value_key)
             if isinstance(param, Params4bit):
                 value = type(param)(value.data, **param.__dict__)
-                value.cuda(device) # Terrible and wrong passing in rank for now hack
-            else:
+                value.cuda(device)
+
+                # With `sync_module_states=True`, a meta device Params4bit needs to be the same
+                # shape as the quantized Params4bit with an initialized quant_state. However,
+                # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
+                # workaround quantizes Params4bit to initialize quant_state on all ranks, then
+                # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+                if is_meta_rank:
+                    param = type(param)(torch.empty_like(value.data, device=torch.device("meta")), **value.__dict__)
+                    param.quant_state = value.quant_state
+                    value = param
+            elif not is_meta_rank:
                 value = type(param)(value.data)
+            else:
+                value = param
         except AttributeError:
             pass  # it's a buffer
         setattr(submodule, value_key, value)
     except:
         print(f"Module {module_key} not found")
+
+
+def convert_to_meta(module:nn.Module, name:str):
+    module_key, _, value_key = name.rpartition('.')
+    submodule = module.get_submodule(module_key)
+    try:
+        param = submodule.get_parameter(value_key)
+        param = type(param)(torch.empty_like(param.data, device=torch.device("meta")), **param.__dict__)
+        print(f'{name=}, {param.requires_grad=}')
+    except AttributeError:
+        pass  # it's a buffer
+    setattr(submodule, value_key, param)
+
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -257,7 +278,7 @@ def fsdp_main(rank, world_size, args):
     elif args["precision"] == "bf16_autocast":
         compute_dtype = torch.bfloat16
         torch_dtype = torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)    
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_buffers_autocast":
         compute_dtype = torch.bfloat16
         torch_dtype = torch.bfloat16
@@ -336,7 +357,7 @@ def fsdp_main(rank, world_size, args):
     elif args["train_type"] == "qlora": # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
-        # cfg.update(dict(num_hidden_layers=2)) # debug mode.
+
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -357,13 +378,12 @@ def fsdp_main(rank, world_size, args):
                 # This means the model probably doesn't have a safetensors file
                 raise e
 
-        # Load in the weights, using our custom load_param function which quantizes Params4bit on the fly
-        # TODO: low_memory doesn't work for QLoRA. Hangs on sharding. Something special to do for this to work, following llama-recipes doesn't work
-        if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
-            for filename in files:
-                weights = safetensors.torch.load_file(filename)
-                for name, param in weights.items():
-                    load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names)
+        for filename in files:
+            weights = safetensors.torch.load_file(filename)
+            for name, param in weights.items():
+                load_param(model, name, param, dtype=torch_dtype, device=rank,
+                           is_meta_rank=(args["low_memory"] and rank!=0), meta_quant=args["meta_quant"])
+        model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -377,7 +397,13 @@ def fsdp_main(rank, world_size, args):
             target_modules=args["lora_target_modules"],
         )
         model = get_peft_model(model, peft_config)
-        if rank==0: model.print_trainable_parameters()
+        if rank==0:
+            model.print_trainable_parameters()
+        elif args['low_memory']:
+            for name, param in model.named_parameters():
+                if "lora" in name:
+                    convert_to_meta(model, name)
+
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
 
     args["logger"].log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
@@ -429,25 +455,7 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    # print(model)
-    # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
-    # print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
-    # print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
-    # print("Model Mixed precision", model.mixed_precision.param_dtype)
-    # print("LORA Mixed precision", model.mixed_precision.param_dtype)    
-    # # import pdb; pdb.set_trace()
-    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    # print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
-    # print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
-    # # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
-    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
-    # print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
-    # from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
-    # print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
-    
-    
-    
-    # return
+
     # Synchronize at the start
     dist.barrier()
 
@@ -621,7 +629,7 @@ def fsdp_main(rank, world_size, args):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: str = "lora", # "full", "lora", or "qlora"
+    train_type: str = "qlora", # "full", "lora", or "qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
