@@ -382,8 +382,8 @@ def fsdp_main(rank, world_size, args):
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
                 load_param(model, name, param, dtype=torch_dtype, device=rank,
-                           is_meta_rank=(args["low_memory"] and rank!=0), meta_quant=args["meta_quant"])
-        model.to(torch_dtype)
+                           is_meta_rank=(args["low_memory"] and rank!=0))
+
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
