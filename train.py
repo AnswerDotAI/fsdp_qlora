@@ -315,7 +315,7 @@ def fsdp_main(rank, world_size, args):
                 torch_dtype=torch_dtype,
                 _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
             )
-            model.to(rank).to(torch_dtype)
+            # model.to(rank).to(torch_dtype) # Don't need, causes OOM. First load to cpu and then shard to GPU.
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
