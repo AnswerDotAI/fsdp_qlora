@@ -129,39 +129,61 @@ def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None
                skip_names=[], to_cpu=False, rank=None, low_memory=False):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
+    
     try:
         submodule = module.get_submodule(module_key)
+    except Exception as e:
+        print(f"Failed to load {name} into {module_key}")
+        print(e)
+        return
         
-        if any([skip_name in name for skip_name in skip_names]):
-            print(f"Skipping {name} because it is in skip_names")
-            return
-        
-        print(f"Loading {name} into {module_key}")
-        try:
-            param = submodule.get_parameter(value_key)
-            if isinstance(param, Params4bit):
-                value = type(param)(value.data, **param.__dict__)
-                value.cuda(device) # Force quantize. Terrible and wrong passing in rank for now hack
-                if low_memory and rank != 0:
-                    # cast only weights back to meta device
-                    value = type(value)(value.data.to("meta"), **param.__dict__)
+    if any([skip_name in name for skip_name in skip_names]):
+        print(f"Skipping {name} because it is in skip_names")
+        return
+
+    print(f"Loading {name} into {module_key}")
+    try:
+        param = submodule.get_parameter(value_key)
+        if isinstance(param, Params4bit):
+            # Load unquantized weights.
+            value = type(param)(value.data, **param.__dict__)
+            # Force quantize. Terrible and wrong passing in rank for now hack
+            value.cuda(device) 
+            if low_memory and rank != 0:
+                # Cast only weights back to meta device, 
+                # keeping the created quant_state on device and other flags set like bnb_quantized.
+                value = type(value)(value.data.to("meta"), **value.__dict__)
+                # print(value.__dict__['quant_state'].as_dict())
             else:
-                if low_memory and rank != 0:
-                    value = type(param)(value.data.to("meta"))
+                # Cast rank 0 weights back to cpu.
+                if to_cpu:
+                    value = type(value)(value.data.to("cpu"), **value.__dict__)
+                
+        else:
+            if low_memory and rank != 0:
+                # Cast weights back to meta device.
+                value = type(param)(value.data.to("meta"))
+            else:
+                # Cast rank 0 weights back to cpu or gpu device.
+                if to_cpu:
+                    value = type(param)(value.data.to("cpu"))
                 else:
                     value = type(param)(value.data)
-        except AttributeError:
-            pass  # it's a buffer
+    except AttributeError:
+        pass  # it's a buffer
         
-        # if value.dtype == torch.float32:
-        #     print(value_key, value.dtype)
-        #     raise ValueError("Float32 param")
-        setattr(submodule, value_key, value)
-        
-        if to_cpu:
-            submodule.to("cpu")
-    except:
-        print(f"Module {module_key} not found")
+    
+    # if value.dtype == torch.float32:
+    #     print(value_key, value.dtype)
+    #     raise ValueError("Float32 param")
+    setattr(submodule, value_key, value)
+    print(f"rank: {rank}, value_key: {name}, device: {value.device}")
+    
+    # if to_cpu :
+    #     if (not low_memory) or (low_memory and rank == 0):
+    #         submodule.to("cpu")
+
+
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -454,7 +476,7 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    # print(model)
+    print(model)
     # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
     # print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
     # print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
@@ -482,11 +504,13 @@ def fsdp_main(rank, world_size, args):
     
         
     # For mem-eff loading testing.
-    decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
-    with FSDP.summon_full_params(decoder_layer, recurse=True, offload_to_cpu=True, rank0_only=False):
-        torch.save(lora_base_layer.quant_state, f"data/summoned_lora_layer0_q_proj_quant_state_rank{rank}.pt")
-        torch.save(list(lora_base_layer.parameters()), f"data/summoned_lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
+    # Summon module at each rank, and then save for comparsion.
+    # Compare quant_state, params, and also compare it with original loaded model weights.
+    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
+    # lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
+    # with FSDP.summon_full_params(decoder_layer, recurse=True, offload_to_cpu=True, rank0_only=False):
+    #     torch.save(lora_base_layer.quant_state, f"data/summoned_lora_layer0_q_proj_quant_state_rank{rank}.pt")
+    #     torch.save(list(lora_base_layer.parameters()), f"data/summoned_lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
 
     
     # return
