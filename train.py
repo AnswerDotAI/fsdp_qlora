@@ -125,25 +125,41 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[]):
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, 
+               skip_names=[], to_cpu=False, rank=None, low_memory=False):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
     try:
         submodule = module.get_submodule(module_key)
-        print(f"Loading {name} into {module_key}")
+        
         if any([skip_name in name for skip_name in skip_names]):
             print(f"Skipping {name} because it is in skip_names")
             return
+        
+        print(f"Loading {name} into {module_key}")
         try:
             param = submodule.get_parameter(value_key)
             if isinstance(param, Params4bit):
                 value = type(param)(value.data, **param.__dict__)
-                value.cuda(device) # Terrible and wrong passing in rank for now hack
+                value.cuda(device) # Force quantize. Terrible and wrong passing in rank for now hack
+                if low_memory and rank != 0:
+                    # cast only weights back to meta device
+                    value = type(value)(value.data.to("meta"), **param.__dict__)
             else:
-                value = type(param)(value.data)
+                if low_memory and rank != 0:
+                    value = type(param)(value.data.to("meta"))
+                else:
+                    value = type(param)(value.data)
         except AttributeError:
             pass  # it's a buffer
+        
+        # if value.dtype == torch.float32:
+        #     print(value_key, value.dtype)
+        #     raise ValueError("Float32 param")
         setattr(submodule, value_key, value)
+        
+        if to_cpu:
+            submodule.to("cpu")
     except:
         print(f"Module {module_key} not found")
 
@@ -342,7 +358,7 @@ def fsdp_main(rank, world_size, args):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
-        # cfg.update(dict(num_hidden_layers=2)) # debug mode.
+        cfg.update(dict(num_hidden_layers=2)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -365,11 +381,12 @@ def fsdp_main(rank, world_size, args):
 
         # Load in the weights, using our custom load_param function which quantizes Params4bit on the fly
         # TODO: low_memory doesn't work for QLoRA. Hangs on sharding. Something special to do for this to work, following llama-recipes doesn't work
-        if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
-            for filename in files:
-                weights = safetensors.torch.load_file(filename)
-                for name, param in weights.items():
-                    load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names)
+        # if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
+        for filename in files:
+            weights = safetensors.torch.load_file(filename)
+            for name, param in weights.items():
+                load_param(model, name, param, dtype=torch_dtype, device=rank, 
+                            skip_names=load_param_skip_names, to_cpu=True, rank=rank, low_memory=args["low_memory"])
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -447,17 +464,35 @@ def fsdp_main(rank, world_size, args):
     # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
     # print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
     # print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
-    # # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A['default']
+    # lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
+    
+    # save lora base layer weights to verify correct loading in all ranks.
+    # torch.save(lora_base_layer.state_dict(), f"data/lora_layer0_q_proj_base_layer_rank{rank}.pt")
     # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
     # print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
     # from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
-    # print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
+    # # print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
+    # torch.save(lora_base_layer.quant_state, f"data/lora_layer0_q_proj_quant_state_rank{rank}.pt")
+    # save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
+    # with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+    #     cpu_state_dict = lora_base_layer.state_dict()
+    #     torch.save(cpu_state_dict, f"data/lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
     
-    
+        
+    # For mem-eff loading testing.
+    decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
+    lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
+    with FSDP.summon_full_params(decoder_layer, recurse=True, offload_to_cpu=True, rank0_only=False):
+        torch.save(lora_base_layer.quant_state, f"data/summoned_lora_layer0_q_proj_quant_state_rank{rank}.pt")
+        torch.save(list(lora_base_layer.parameters()), f"data/summoned_lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
+
     
     # return
     # Synchronize at the start
     dist.barrier()
+    # raise ValueError("Stop here")
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
