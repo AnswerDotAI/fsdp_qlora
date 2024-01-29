@@ -140,41 +140,49 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None,
-               skip_names=[], is_meta_rank:bool=False, verbose:bool=False):
-    value = value.to(device=device, dtype=dtype)
+def load_and_quantize(module:nn.Module, name:str, value:Tensor, device=None, dtype=None,
+                      skip_names=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False):
+    def place_on_device(value):
+        if is_meta_rank:
+            device = 'meta'
+        elif low_memory:
+            device = 'cpu'
+        return value.to(device=device, dtype=dtype)
+
+    if any([skip_name in name for skip_name in skip_names]):
+        if verbose:
+            print(f"Skipping {name} because it is in skip_names")
+        return
+
     module_key, _, value_key = name.rpartition('.')
     try:
-        if any([skip_name in name for skip_name in skip_names]):
-            if verbose:
-                print(f"Skipping {name} because it is in skip_names")
-            return
-
         submodule = module.get_submodule(module_key)
-        try:
-            param = submodule.get_parameter(value_key)
-            if isinstance(param, Params4bit):
-                value = type(param)(value.data, **param.__dict__)
-                value = value.cuda(device)
+    except AttributeError as e:
+        print(f"Module {module_key} not found:\n{e}")
+        return
 
-                # With `sync_module_states=True`, a meta device Params4bit needs to be the same
-                # shape as the quantized Params4bit with an initialized quant_state. However,
-                # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
-                # workaround quantizes Params4bit to initialize quant_state on all ranks, then
-                # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
-                if is_meta_rank:
-                    param = type(param)(torch.empty_like(value.data, device=torch.device("meta")), **value.__dict__)
-                    param.quant_state = value.quant_state
-                    value = param
-            elif not is_meta_rank:
-                value = type(param)(value.data)
-            else:
-                value = param
-        except AttributeError:
-            pass  # it's a buffer
-        setattr(submodule, value_key, value)
-    except:
-        print(f"Module {module_key} not found")
+    try:
+        param = submodule.get_parameter(value_key)
+        if isinstance(param, Params4bit):
+            # With `sync_module_states=True`, a meta device Params4bit needs to be the same
+            # shape as the quantized Params4bit with an initialized quant_state. However,
+            # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
+            # workaround quantizes Params4bit to initialize quant_state on all ranks, then
+            # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+            value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
+            if is_meta_rank:
+                value = type(param)(value.data.to("meta"), **value.__dict__)
+            elif low_memory:
+                value = type(param)(value.data.to("cpu"), **value.__dict__)
+        else:
+            value = type(param)(place_on_device(value).data)
+
+    except AttributeError:
+        # it's a buffer
+        value = place_on_device(value)
+        pass
+    setattr(submodule, value_key, value)
+
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -390,8 +398,8 @@ def fsdp_main(rank, world_size, args):
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
-                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+                load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
+                                  is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
@@ -651,7 +659,7 @@ def main(
     dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
-    low_memory: bool_arg = False, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
+    low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model TODO
