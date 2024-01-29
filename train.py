@@ -13,7 +13,7 @@ Not all combinations of arguments will work. See the accompanying blog post for 
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy, math
+import torch, os, gc, time, safetensors, copy, math, types
 import functools
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
@@ -125,64 +125,65 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, 
-               skip_names=[], to_cpu=False, rank=None, low_memory=False):
+def setup_quantized_meta_for_peft(model:nn.Module):
+    def temp_to_method(self, *args, **kwargs):
+        return self
+    for param in model.parameters():
+        if isinstance(param, Params4bit):
+            param.quant_state._orig_to = param.quant_state.to
+            param.quant_state.to = types.MethodType(temp_to_method, param.quant_state)
+
+def setup_quantized_peft_meta_for_training(model:nn.Module):
+    for param in model.parameters():
+        if isinstance(param, Params4bit) and hasattr(param.quant_state, '_orig_to'):
+            param.quant_state.to = param.quant_state._orig_to
+            param.quant_state._orig_to = None
+
+
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None,
+               skip_names=[], is_meta_rank:bool=False, verbose:bool=False):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
     
     try:
         submodule = module.get_submodule(module_key)
     except Exception as e:
-        print(f"Failed to load {name} into {module_key}")
-        print(e)
-        return
-        
+        if verbose:
+            print(f"Failed to load {name} into {module_key}")
+            print(e)
+            return    
+    
     if any([skip_name in name for skip_name in skip_names]):
-        print(f"Skipping {name} because it is in skip_names")
+        if verbose:
+            print(f"Skipping {name} because it is in skip_names")
         return
-
-    print(f"Loading {name} into {module_key}")
+    
+    if verbose:
+        print(f"Loading {name} into {module_key}")
+    
     try:
         param = submodule.get_parameter(value_key)
         if isinstance(param, Params4bit):
-            # Load unquantized weights.
             value = type(param)(value.data, **param.__dict__)
-            # Force quantize. Terrible and wrong passing in rank for now hack
-            value.cuda(device) 
-            if low_memory and rank != 0:
-                # Cast only weights back to meta device, 
-                # keeping the created quant_state on device and other flags set like bnb_quantized.
-                value = type(value)(value.data.to("meta"), **value.__dict__)
-                # print(value.__dict__['quant_state'].as_dict())
+            value = value.cuda(device)
+
+            # With `sync_module_states=True`, a meta device Params4bit needs to be the same
+            # shape as the quantized Params4bit with an initialized quant_state. However,
+            # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
+            # workaround quantizes Params4bit to initialize quant_state on all ranks, then
+            # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+            if is_meta_rank:
+                param = type(param)(value.data.to("meta"), **value.__dict__)
+                # param.quant_state = value.quant_state
             else:
-                # Cast rank 0 weights back to cpu.
-                if to_cpu:
-                    value = type(value)(value.data.to("cpu"), **value.__dict__)
-                
+                param = type(param)(value.data.to("cpu"), **value.__dict__)
+                # param.quant_state = value.quant_state
         else:
-            if low_memory and rank != 0:
-                # Cast weights back to meta device.
-                value = type(param)(value.data.to("meta"))
-            else:
-                # Cast rank 0 weights back to cpu or gpu device.
-                if to_cpu:
-                    value = type(param)(value.data.to("cpu"))
-                else:
-                    value = type(param)(value.data)
+            param = type(param)(value.data.to("cpu"))
+        
     except AttributeError:
         pass  # it's a buffer
-        
-    
-    # if value.dtype == torch.float32:
-    #     print(value_key, value.dtype)
-    #     raise ValueError("Float32 param")
-    setattr(submodule, value_key, value)
-    print(f"rank: {rank}, value_key: {name}, device: {value.device}")
-    
-    # if to_cpu :
-    #     if (not low_memory) or (low_memory and rank == 0):
-    #         submodule.to("cpu")
-
+    setattr(submodule, value_key, param)
 
 
 ### DATASET (modified from llama recipes)
@@ -295,7 +296,7 @@ def fsdp_main(rank, world_size, args):
     elif args["precision"] == "bf16_autocast":
         compute_dtype = torch.bfloat16
         torch_dtype = torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)    
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_buffers_autocast":
         compute_dtype = torch.bfloat16
         torch_dtype = torch.bfloat16
@@ -402,13 +403,11 @@ def fsdp_main(rank, world_size, args):
                 raise e
 
         # Load in the weights, using our custom load_param function which quantizes Params4bit on the fly
-        # TODO: low_memory doesn't work for QLoRA. Hangs on sharding. Something special to do for this to work, following llama-recipes doesn't work
-        # if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_param(model, name, param, dtype=torch_dtype, device=rank, 
-                            skip_names=load_param_skip_names, to_cpu=True, rank=rank, low_memory=args["low_memory"])
+                load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
+                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -421,8 +420,19 @@ def fsdp_main(rank, world_size, args):
             lora_dropout=args["lora_dropout"],
             target_modules=args["lora_target_modules"],
         )
+        # PEFT will move quant_state to meta device, so this method prevents that
+        # from happening by replacing quant_state.to with a dummy function
+        if rank!=0 and args["low_memory"]:
+            setup_quantized_meta_for_peft(model)
+
         model = get_peft_model(model, peft_config)
-        if rank==0: model.print_trainable_parameters()
+
+        # And then setup_quantized_peft_meta_for_training returns quant_state.to back to normal
+        if rank==0:
+            model.print_trainable_parameters()
+        elif args['low_memory']:
+            setup_quantized_peft_meta_for_training(model)
+
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
         
     if args["train_type"] == "qlora":
@@ -529,6 +539,7 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
+<<<<<<< HEAD
     if rank == 0: print(model)
     # raise ValueError("Stop here")
     # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
@@ -574,6 +585,9 @@ def fsdp_main(rank, world_size, args):
 
     
     # return
+=======
+
+>>>>>>> qlora_sync_module_states
     # Synchronize at the start
     dist.barrier()
     # raise ValueError("Stop here")
