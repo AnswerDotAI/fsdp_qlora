@@ -412,7 +412,7 @@ def fsdp_main(rank, world_size, args):
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
     # PEFT setup (LoRA and QLoRA)
-    if args["train_type"] == "lora" or args["train_type"] == "hf_qlora":
+    if args["train_type"] == "lora" or args["train_type"] == "qlora" or args["train_type"] == "hf_qlora":
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM, inference_mode=False,
             r=args["lora_rank"],
@@ -434,59 +434,6 @@ def fsdp_main(rank, world_size, args):
             setup_quantized_peft_meta_for_training(model)
 
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
-        
-    if args["train_type"] == "qlora":
-        # Create custom lora module
-        class QLORA(nn.Module):
-            def __init__(self, base_layer, device="cpu"):
-                super().__init__()
-                self.base_layer = base_layer
-                dtype = base_layer.compute_dtype
-                self.lora_A = nn.Linear(base_layer.in_features, args["lora_rank"], bias=False, device=device, dtype=dtype)
-                self.lora_B = nn.Linear(args["lora_rank"], base_layer.out_features, bias=False, device=device, dtype=dtype)
-                self.lora_alpha = args["lora_alpha"]
-                self.lora_dropout = nn.Dropout(args["lora_dropout"])
-                self.scaling = self.lora_alpha / args['lora_rank']
-
-            def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-
-                result = self.base_layer(x, *args, **kwargs)
-                # As per Tim Dettmers, for 4bit, we need to defensively clone here.
-                # The reason is that in some cases, an error can occur that backprop
-                # does not work on a manipulated view. This issue may be solved with
-                # newer PyTorch versions but this would need extensive testing to be
-                # sure.
-                result = result.clone()
-
-                requires_conversion = not torch.is_autocast_enabled()
-                if requires_conversion:
-                    expected_dtype = result.dtype
-                    x = x.to(self.lora_A.weight.dtype)
-
-                output = self.lora_B(self.lora_A(self.lora_dropout(x)))
-                if requires_conversion:
-                    output = output.to(expected_dtype)
-                output = output * self.scaling
-                
-                # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
-                result += output
-
-                return result
-            
-        for name, _ in model.named_modules():
-            module_key, _, value_key = name.rpartition('.')
-            if value_key in args['lora_target_modules']:
-                m = model.get_submodule(name)
-                qlora_layer = QLORA(m)
-                parent_module = model.get_submodule(module_key)
-                setattr(parent_module, value_key, qlora_layer)
-        
-        for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_A', 'lora_B']]):
-                p.requires_grad = True
-            else:
-                p.requires_grad = False
-            
         
     args["logger"].log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
 
@@ -539,7 +486,6 @@ def fsdp_main(rank, world_size, args):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-<<<<<<< HEAD
     if rank == 0: print(model)
     # raise ValueError("Stop here")
     # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
@@ -584,10 +530,6 @@ def fsdp_main(rank, world_size, args):
     #     torch.save(list(lora_base_layer.parameters()), f"data/summoned_lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
 
     
-    # return
-=======
-
->>>>>>> qlora_sync_module_states
     # Synchronize at the start
     dist.barrier()
     # raise ValueError("Stop here")
