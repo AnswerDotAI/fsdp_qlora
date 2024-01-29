@@ -13,7 +13,7 @@ Not all combinations of arguments will work. See the accompanying blog post for 
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy, math
+import torch, os, gc, time, safetensors, copy, math, types
 import functools
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
@@ -125,16 +125,37 @@ def clear_gpu_cache(rank=None):
     torch.cuda.empty_cache()
 
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None, skip_names=[], is_meta_rank:bool=False):
+def setup_quantized_meta_for_peft(model:nn.Module):
+    def temp_to_method(self, *args, **kwargs):
+        return self
+    for param in model.parameters():
+        if isinstance(param, Params4bit):
+            param.quant_state._orig_to = param.quant_state.to
+            param.quant_state.to = types.MethodType(temp_to_method, param.quant_state)
+
+def setup_quantized_peft_meta_for_training(model:nn.Module):
+    for param in model.parameters():
+        if isinstance(param, Params4bit) and hasattr(param.quant_state, '_orig_to'):
+            param.quant_state.to = param.quant_state._orig_to
+            param.quant_state._orig_to = None
+
+
+def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None,
+               skip_names=[], is_meta_rank:bool=False, verbose:bool=False):
     value = value.to(device=device, dtype=dtype)
     module_key, _, value_key = name.rpartition('.')
     try:
+        if any([skip_name in name for skip_name in skip_names]):
+            if verbose:
+                print(f"Skipping {name} because it is in skip_names")
+            return
+
         submodule = module.get_submodule(module_key)
         try:
             param = submodule.get_parameter(value_key)
             if isinstance(param, Params4bit):
                 value = type(param)(value.data, **param.__dict__)
-                value.cuda(device)
+                value = value.cuda(device)
 
                 # With `sync_module_states=True`, a meta device Params4bit needs to be the same
                 # shape as the quantized Params4bit with an initialized quant_state. However,
@@ -154,19 +175,6 @@ def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None
         setattr(submodule, value_key, value)
     except:
         print(f"Module {module_key} not found")
-
-
-def convert_to_meta(module:nn.Module, name:str):
-    module_key, _, value_key = name.rpartition('.')
-    submodule = module.get_submodule(module_key)
-    try:
-        param = submodule.get_parameter(value_key)
-        param = type(param)(torch.empty_like(param.data, device=torch.device("meta")), **param.__dict__)
-        print(f'{name=}, {param.requires_grad=}')
-    except AttributeError:
-        pass  # it's a buffer
-    setattr(submodule, value_key, param)
-
 
 ### DATASET (modified from llama recipes)
 PROMPT_DICT = {
@@ -378,12 +386,13 @@ def fsdp_main(rank, world_size, args):
                 # This means the model probably doesn't have a safetensors file
                 raise e
 
+        # Load in the weights, using our custom load_param function which quantizes Params4bit on the fly
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_param(model, name, param, dtype=torch_dtype, device=rank,
-                           is_meta_rank=(args["low_memory"] and rank!=0))
-
+                load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
+                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+        model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -396,13 +405,18 @@ def fsdp_main(rank, world_size, args):
             lora_dropout=args["lora_dropout"],
             target_modules=args["lora_target_modules"],
         )
+        # PEFT will move quant_state to meta device, so this method prevents that
+        # from happening by replacing quant_state.to with a dummy function
+        if rank!=0 and args["low_memory"]:
+            setup_quantized_meta_for_peft(model)
+
         model = get_peft_model(model, peft_config)
+
+        # And then setup_quantized_peft_meta_for_training returns quant_state.to back to normal
         if rank==0:
             model.print_trainable_parameters()
         elif args['low_memory']:
-            for name, param in model.named_parameters():
-                if "lora" in name:
-                    convert_to_meta(model, name)
+            setup_quantized_peft_meta_for_training(model)
 
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
 
@@ -629,7 +643,7 @@ def fsdp_main(rank, world_size, args):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: str = "qlora", # "full", "lora", or "qlora"
+    train_type: str = "lora", # "full", "lora", or "qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
