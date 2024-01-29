@@ -173,17 +173,20 @@ def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None
             # workaround quantizes Params4bit to initialize quant_state on all ranks, then
             # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
             if is_meta_rank:
-                param = type(param)(value.data.to("meta"), **value.__dict__)
+                value = type(value)(value.data.to("meta"), **value.__dict__)
                 # param.quant_state = value.quant_state
             else:
-                param = type(param)(value.data.to("cpu"), **value.__dict__)
+                value = type(value)(value.data.to("cpu"), **value.__dict__)
                 # param.quant_state = value.quant_state
         else:
-            param = type(param)(value.data.to("cpu"))
+            if is_meta_rank:
+                value = type(param)(value.data.to("meta"))
+            else:
+                value = type(param)(value.data.to("cpu"))
         
     except AttributeError:
         pass  # it's a buffer
-    setattr(submodule, value_key, param)
+    setattr(submodule, value_key, value)
 
 
 ### DATASET (modified from llama recipes)
@@ -377,11 +380,11 @@ def fsdp_main(rank, world_size, args):
             _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
         )
 
-    elif args["train_type"] == "qlora": # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
-        # cfg.update(dict(num_hidden_layers=2)) # debug mode.
+        cfg.update(dict(num_hidden_layers=60)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -432,6 +435,57 @@ def fsdp_main(rank, world_size, args):
             model.print_trainable_parameters()
         elif args['low_memory']:
             setup_quantized_peft_meta_for_training(model)
+    elif args["train_type"] == "custom_qlora":
+        # Create custom lora module
+        class QLORA(nn.Module):
+            def __init__(self, base_layer, device="cpu"):
+                super().__init__()
+                self.base_layer = base_layer
+                dtype = base_layer.compute_dtype
+                self.lora_A = nn.Linear(base_layer.in_features, args["lora_rank"], bias=False, device=device, dtype=dtype)
+                self.lora_B = nn.Linear(args["lora_rank"], base_layer.out_features, bias=False, device=device, dtype=dtype)
+                self.lora_alpha = args["lora_alpha"]
+                self.lora_dropout = nn.Dropout(args["lora_dropout"])
+                self.scaling = self.lora_alpha / args['lora_rank']
+
+            def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+
+                result = self.base_layer(x, *args, **kwargs)
+                # As per Tim Dettmers, for 4bit, we need to defensively clone here.
+                # The reason is that in some cases, an error can occur that backprop
+                # does not work on a manipulated view. This issue may be solved with
+                # newer PyTorch versions but this would need extensive testing to be
+                # sure.
+                result = result.clone()
+
+                requires_conversion = not torch.is_autocast_enabled()
+                if requires_conversion:
+                    expected_dtype = result.dtype
+                    x = x.to(self.lora_A.weight.dtype)
+
+                output = self.lora_B(self.lora_A(self.lora_dropout(x)))
+                if requires_conversion:
+                    output = output.to(expected_dtype)
+                output = output * self.scaling
+                
+                # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
+                result += output
+
+                return result
+            
+        for name, _ in model.named_modules():
+            module_key, _, value_key = name.rpartition('.')
+            if value_key in args['lora_target_modules']:
+                m = model.get_submodule(name)
+                qlora_layer = QLORA(m)
+                parent_module = model.get_submodule(module_key)
+                setattr(parent_module, value_key, qlora_layer)
+        
+        for n,p in model.named_parameters():
+            if any([lora_name in n for lora_name in ['lora_A', 'lora_B']]):
+                p.requires_grad = True
+            else:
+                p.requires_grad = False
 
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
         
