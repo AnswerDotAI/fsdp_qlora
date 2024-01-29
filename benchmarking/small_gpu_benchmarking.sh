@@ -63,7 +63,7 @@ python train.py --batch_size 1 --use_ddp True --model_name codellama/CodeLlama-3
 # FIXME: torch.multiprocessing.spawn.ProcessExitedException: process 1 terminated with signal SIGKILl. Needs more CPU memory than 88GB?
 python train.py --batch_size 1 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
 python train.py --batch_size 10 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
-python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
+python train.py --batch_size 1 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
 python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
 python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
 python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
