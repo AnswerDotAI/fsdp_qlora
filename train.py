@@ -384,7 +384,7 @@ def fsdp_main(rank, world_size, args):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
-        cfg.update(dict(num_hidden_layers=60)) # debug mode.
+        # cfg.update(dict(num_hidden_layers=60)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -548,17 +548,17 @@ def fsdp_main(rank, world_size, args):
     # print("Model Mixed precision", model.mixed_precision.param_dtype)
     # print("LORA Mixed precision", model.mixed_precision.param_dtype)    
     # # import pdb; pdb.set_trace()
-    decoder_layer = model._fsdp_wrapped_module.model.layers[0]
+    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
     # print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
     # print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
-    lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
-    lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
+    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
+    # lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
     
-    print(f"rank: {rank}, lora layer dtypes and devices")
-    print([(p.shape, p.dtype, p.device) for p in list(lora_layer.parameters())])
+    # print(f"rank: {rank}, lora layer dtypes and devices")
+    # print([(p.shape, p.dtype, p.device) for p in list(lora_layer.parameters())])
    
-    print(f"rank: {rank}, lora base layer dtypes and devices")
-    print([lora_base_layer.weight.shape, lora_base_layer.weight.dtype, lora_base_layer.weight.device])
+    # print(f"rank: {rank}, lora base layer dtypes and devices")
+    # print([lora_base_layer.weight.shape, lora_base_layer.weight.dtype, lora_base_layer.weight.device])
     
     
     # save lora base layer weights to verify correct loading in all ranks.
