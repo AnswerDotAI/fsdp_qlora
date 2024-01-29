@@ -432,8 +432,8 @@ def fsdp_main(rank, world_size, args):
                 super().__init__()
                 self.base_layer = base_layer
                 dtype = base_layer.compute_dtype
-                self.lora_A = nn.Linear(cfg.hidden_size, args["lora_rank"], bias=False, device=device, dtype=dtype)
-                self.lora_B = nn.Linear(args["lora_rank"], cfg.hidden_size, bias=False, device=device, dtype=dtype)
+                self.lora_A = nn.Linear(base_layer.in_features, args["lora_rank"], bias=False, device=device, dtype=dtype)
+                self.lora_B = nn.Linear(args["lora_rank"], base_layer.out_features, bias=False, device=device, dtype=dtype)
                 self.lora_alpha = args["lora_alpha"]
                 self.lora_dropout = nn.Dropout(args["lora_dropout"])
                 self.scaling = self.lora_alpha / args['lora_rank']
@@ -458,7 +458,7 @@ def fsdp_main(rank, world_size, args):
                     output = output.to(expected_dtype)
                 output = output * self.scaling
                 
-                print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
+                # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
                 result += output
 
                 return result
