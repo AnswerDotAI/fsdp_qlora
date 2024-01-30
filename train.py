@@ -24,6 +24,7 @@ import torch.multiprocessing as mp
 from contextlib import nullcontext
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
+from typing import List, Dict
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
@@ -262,6 +263,9 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
             'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
         )
 
+    # truncate dataset so it's evenly divisible by grad_accumulation_steps
+    dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
+
     # Create the InstructionDataset (w/ prompt formatting)
     dataset = InstructionDataset(dataset, tokenizer)
 
@@ -279,7 +283,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
 
     # For distributed training, use DistributedSampler
-    sampler = DistributedSampler(dataset)
+    sampler = DistributedSampler(dataset, seed=args["seed"])
 
     # Use the custom collate function in DataLoader
     dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
@@ -551,11 +555,10 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     else:
         autocast = nullcontext()
     scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
-    scale_loss = scaler is not None
+    scale_grads = scaler is not None
 
 
     # Train loop
-    # TODO: no_sync() is needed to accumulate gradients with cpu offloading.
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
@@ -564,8 +567,15 @@ def fsdp_main(rank:int, world_size:int, args:dict):
         model.train()
         ddp_loss = torch.zeros(2).to(rank)
         for batch_idx, batch in enumerate(dataloader):
+            accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
-            if rank == 0 and args['verbose']: print(f"Epoch {epoch}, Batch {batch_idx}")
+            # Prevent gradient syncing until update step if using no_sync option.
+            # Documentation states this should only be used on the root FSDP instance
+            # We assume this is a one-node setup
+            if args['no_sync'] and not accumulate_grads:
+                sync_context = model.no_sync()
+            else:
+                sync_context = nullcontext()
 
             # Start logging memory (first iter) if requested
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
@@ -579,26 +589,27 @@ def fsdp_main(rank:int, world_size:int, args:dict):
                 args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Forward pass
-            with autocast:
-                output = model(
-                    batch['input_ids'].to(rank),
-                    labels=batch['labels'].to(rank),
-                    attention_mask=batch['attention_mask'].to(rank)
-                )
-                loss = output.loss
+            with sync_context:
+                with autocast:
+                    output = model(
+                        batch['input_ids'].to(rank),
+                        labels=batch['labels'].to(rank),
+                        attention_mask=batch['attention_mask'].to(rank)
+                    )
+                    loss = output.loss
 
-            # Scale loss for gradient accumulation
-            loss = loss / gradient_accumulation_steps
+                # Scale loss for gradient accumulation
+                loss = loss / gradient_accumulation_steps
 
-            # Log memory usage
-            if batch_idx==0:
-                args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+                # Log memory usage
+                if batch_idx==0:
+                    args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
-            # Backward pass
-            if scale_loss:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+                # Backward pass
+                if scale_grads:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             # Record loss
             bs = batch['input_ids'].shape[0]
@@ -606,13 +617,18 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             ddp_loss[1] += bs
 
             # Step the optimizer (w/ gradient accumulation)
-            if batch_idx % gradient_accumulation_steps == 0:
+            if accumulate_grads:
                 if args['grad_norm'] is not None:
                     model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
-                optimizer.step()
+                if scale_grads:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()
                 progress_bar.update(1)
+
             # Log memory usage after backwards
             if batch_idx==0:
                 args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
@@ -632,7 +648,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
             # Log loss every gradient update steps
-            if batch_idx % gradient_accumulation_steps == 0:
+            if accumulate_grads:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
@@ -684,6 +700,7 @@ def main(
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
+    no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model
@@ -723,6 +740,12 @@ def main(
 
     if args["precision"] in ["bf16", "bf16_autocast", "bf16_buffers_autocast"] and not torch.cuda.is_bf16_supported():
         raise ValueError('Current device does not support bfloat16')
+
+    # Set no_sync if using cpu_offload and gradient accumulation. Turn off if not using gradient accumulation
+    if args["use_cpu_offload"] and args["gradient_accumulation_steps"] > 1:
+        args["no_sync"] = True
+    elif args["no_sync"] and args["gradient_accumulation_steps"] == 1:
+        args["no_sync"] = False
 
     # Run
     mp.spawn(fsdp_main,
