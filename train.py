@@ -53,7 +53,8 @@ from accelerate import init_empty_weights
 from accelerate.utils import set_seed
 from peft import get_peft_model, LoraConfig, TaskType
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 
 # For different model types, we'll want to import the right class for the
@@ -91,8 +92,16 @@ class Logger:
     def finish(self, rank=0):
         if self.log_to == "wandb" and rank==0: wandb.finish()
 
+
+def clear_gpu_cache(rank:int|None=None):
+    """Clear the GPU cache for all ranks"""
+    if rank == 0:
+        print("Clearing GPU cache for all ranks")
+    torch.cuda.empty_cache()
+
+
 # Utilities related to model loading
-def replace_linear(model, linear_replacement, skip_modules=["lm_head"], **kwargs):
+def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:list[str]=["lm_head"], **kwargs):
     """
     Replace linear modules with a new Linear module.
     Parameters:
@@ -117,15 +126,8 @@ def replace_linear(model, linear_replacement, skip_modules=["lm_head"], **kwargs
             )
     return model
 
-
-def clear_gpu_cache(rank=None):
-    """Clear the GPU cache for all ranks"""
-    if rank == 0:
-        print("Clearing GPU cache for all ranks")
-    torch.cuda.empty_cache()
-
-
 def setup_quantized_meta_for_peft(model:nn.Module):
+    """Replaces `quant_state.to` with a dummy function to prevent PEFT from moving `quant_state` to meta device"""
     def temp_to_method(self, *args, **kwargs):
         return self
     for param in model.parameters():
@@ -134,62 +136,63 @@ def setup_quantized_meta_for_peft(model:nn.Module):
             param.quant_state.to = types.MethodType(temp_to_method, param.quant_state)
 
 def setup_quantized_peft_meta_for_training(model:nn.Module):
+    """Replaces dummy `quant_state.to` method with the original function to allow training to continue"""
     for param in model.parameters():
         if isinstance(param, Params4bit) and hasattr(param.quant_state, '_orig_to'):
             param.quant_state.to = param.quant_state._orig_to
             param.quant_state._orig_to = None
 
+def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
+                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False):
+    """
+    Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
-def load_param(module:nn.Module, name:str, value:Tensor, device=None, dtype=None,
-               skip_names=[], is_meta_rank:bool=False, verbose:bool=False):
-    value = value.to(device=device, dtype=dtype)
-    module_key, _, value_key = name.rpartition('.')
-    
-    try:
-        submodule = module.get_submodule(module_key)
-    except Exception as e:
-        if verbose:
-            print(f"Failed to load {name} into {module_key}")
-            print(e)
-            return    
-    
+    Quantizes `Params4bit` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
+    """
+    def place_on_device(value):
+        if is_meta_rank:
+            device = 'meta'
+        elif low_memory:
+            device = 'cpu'
+        return value.to(device=device, dtype=dtype)
+
     if any([skip_name in name for skip_name in skip_names]):
         if verbose:
             print(f"Skipping {name} because it is in skip_names")
         return
-    
-    if verbose:
-        print(f"Loading {name} into {module_key}")
-    
+
+    module_key, _, value_key = name.rpartition('.')
+    try:
+        submodule = module.get_submodule(module_key)
+    except AttributeError as e:
+        print(f"Module {module_key} not found:\n{e}")
+        return
+
     try:
         param = submodule.get_parameter(value_key)
         if isinstance(param, Params4bit):
-            value = type(param)(value.data, **param.__dict__)
-            value = value.cuda(device)
-
             # With `sync_module_states=True`, a meta device Params4bit needs to be the same
             # shape as the quantized Params4bit with an initialized quant_state. However,
             # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
             # workaround quantizes Params4bit to initialize quant_state on all ranks, then
             # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+            value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
             if is_meta_rank:
-                value = type(value)(value.data.to("meta"), **value.__dict__)
-                # param.quant_state = value.quant_state
-            else:
-                value = type(value)(value.data.to("cpu"), **value.__dict__)
-                # param.quant_state = value.quant_state
+                value = type(param)(value.data.to("meta"), **value.__dict__)
+            elif low_memory:
+                value = type(param)(value.data.to("cpu"), **value.__dict__)
         else:
-            if is_meta_rank:
-                value = type(param)(value.data.to("meta"))
-            else:
-                value = type(param)(value.data.to("cpu"))
-        
+            value = type(param)(place_on_device(value).data)
+
     except AttributeError:
-        pass  # it's a buffer
+        # it's a buffer
+        value = place_on_device(value)
+        pass
     setattr(submodule, value_key, value)
 
 
-### DATASET (modified from llama recipes)
+# DATASET + DATALOADERS (modified from llama recipes)
+# Formatting prompts in alpaca
 PROMPT_DICT = {
     "prompt_input": (
         "Below is an instruction that describes a task, paired with an input that provides further context. "
@@ -203,6 +206,7 @@ PROMPT_DICT = {
     ),
 }
 
+# Dataset class
 class InstructionDataset(Dataset):
     def __init__(self, dataset, tokenizer, partition="train"):
         self.dataset = dataset
@@ -213,8 +217,6 @@ class InstructionDataset(Dataset):
 
     def __getitem__(self, index):
         IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
-
-
         ann = self.dataset[index]
         if ann.get("input", "") == "":
             prompt = PROMPT_DICT["prompt_no_input"].format_map(ann)
@@ -242,6 +244,49 @@ class InstructionDataset(Dataset):
             "attention_mask":example_mask.tolist(),
         }
 
+# And to get the dataloader
+def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
+    """Creates a dataset and appropriate dataloader with distributed sampler."""
+    # Importing here rather than at the start to avoid multiprocessing issues
+    from datasets import Dataset, load_dataset
+
+    # Load the source dataset
+    if args["dataset"] == "alpaca":
+        dataset = load_dataset("yahma/alpaca-cleaned")['train']
+    elif args["dataset"] == "alpaca_sample":
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
+    elif args["dataset"] == "dummy":
+        dataset = Dataset.from_dict({
+            'instruction': ["instruction"]*16,
+            'input': ["input"]*16,
+            'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
+        )
+
+    # Create the InstructionDataset (w/ prompt formatting)
+    dataset = InstructionDataset(dataset, tokenizer)
+
+    # Collate function
+    def collate_fn(batch):
+        # To list of tensors
+        input_ids = [torch.tensor(item['input_ids']) for item in batch]
+        attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
+        labels = [torch.tensor(item['labels']) for item in batch]
+        # Pad + truncate
+        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)[:, :args["context_length"]]
+        attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
+        labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
+        # Return dict
+        return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
+
+    # For distributed training, use DistributedSampler
+    sampler = DistributedSampler(dataset)
+
+    # Use the custom collate function in DataLoader
+    dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
+
+    return dataloader
+
+
 # LR scheduler.
 def _get_cosine_one_cycle_lr_lambda(
     current_step: int, *, num_warmup_steps: int, num_training_steps: int, min_lr_fraction = 0.1,
@@ -252,7 +297,7 @@ def _get_cosine_one_cycle_lr_lambda(
     progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
     return (math.cos(math.pi * progress)+1) * 0.5 * scale_term + min_lr_fraction
 
-def get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1):
+def get_cosine_one_cycle_scheduler(optimizer:optim.Optimizer, num_warmup_steps:int, num_training_steps:int, min_lr_fraction:float=0.1):
     "A more general cosine scheduler with to control the minimum learning rate"
     lr_lambda = functools.partial(
         _get_cosine_one_cycle_lr_lambda,
@@ -262,8 +307,100 @@ def get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_ste
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 
+def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:dict):
+    """Returns linear, cosine, or constant learning rate scheduler"""
+    num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
+    num_scheduler_steps = num_training_steps * dist.get_world_size()
+    num_warmup_steps = int(num_scheduler_steps * 0.1)
+    if args['lr_scheduler'] == "linear":
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_scheduler_steps)
+    elif args['lr_scheduler'] == "cosine":
+        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
+    elif args['lr_scheduler'] == "constant":
+        lr_scheduler = get_constant_schedule(optimizer)
+    else:
+        raise NotImplementedError(f"{args['lr_scheduler']} LR scheduler not implemented yet")
+    return lr_scheduler, num_training_steps
+
+
+# Optimizer
+def get_optimizer(model:nn.Module, args:dict):
+    """Returns an optimizer. We can add more options here if needed."""
+    if args["optimizer"] == "adam":
+        return optim.Adam(model.parameters(), lr=args['lr'])
+    elif args["optimizer"] == "sgd":
+        return optim.SGD(model.parameters(), lr=args['lr'])
+    elif args["optimizer"] == "adadelta":
+        return optim.Adadelta(model.parameters(), lr=args['lr'])
+    elif args["optimizer"] == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), 
+                                 eps=1e-5, weight_decay=args['wd'])
+    else:
+        raise ValueError("Invalid optimizer")
+    
+# Wrap the model (LoRA policy from llama-recipes):
+from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
+from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
+# This checks for lora layers (has weight and requires_grad)
+def create_default_auto_wrap_policy():
+    def lambda_policy_fn(module):
+        return (
+            len(list(module.named_children())) == 0
+            and getattr(module, "weight", None) is not None
+            and module.weight.requires_grad
+        )
+    lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
+    transformer_layer_name = LlamaDecoderLayer
+    transformer_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=(
+            PrefixEncoder,
+            PromptEncoder,
+            PromptEmbedding,
+            transformer_layer_name,
+        ),
+    )
+    return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+
+# Custom QLORA module.
+class QLORA(nn.Module):
+    def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout, device="cpu"):
+        super().__init__()
+        self.base_layer = base_layer
+        dtype = base_layer.compute_dtype
+        self.lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
+        self.lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = nn.Dropout(lora_dropout)
+        self.scaling = self.lora_alpha / lora_rank
+
+    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+
+        result = self.base_layer(x, *args, **kwargs)
+        # As per Tim Dettmers, for 4bit, we need to defensively clone here.
+        # The reason is that in some cases, an error can occur that backprop
+        # does not work on a manipulated view. This issue may be solved with
+        # newer PyTorch versions but this would need extensive testing to be
+        # sure.
+        result = result.clone()
+
+        requires_conversion = not torch.is_autocast_enabled()
+        if requires_conversion:
+            expected_dtype = result.dtype
+            x = x.to(self.lora_A.weight.dtype)
+
+        output = self.lora_B(self.lora_A(self.lora_dropout(x)))
+        if requires_conversion:
+            output = output.to(expected_dtype)
+        output = output * self.scaling
+        
+        # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
+        result += output
+
+        return result
+
 # Main function, run on each process
-def fsdp_main(rank, world_size, args):
+def fsdp_main(rank:int, world_size:int, args:dict):
 
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
@@ -287,103 +424,54 @@ def fsdp_main(rank, world_size, args):
     mp_policy = None
     load_param_skip_names = []
     if args["precision"] == "bf16":
-        torch_dtype = torch.bfloat16
-        compute_dtype = torch.bfloat16
+        torch_dtype, compute_dtype = torch.bfloat16, torch.bfloat16
     elif args["precision"] == "fp32":
-        torch_dtype = torch.float32
-        compute_dtype = torch.float16
+        torch_dtype, compute_dtype = torch.float32, torch.float16
     elif args["precision"] == "fp16_autocast":
-        compute_dtype = torch.float16
-        torch_dtype = torch.float32
+        compute_dtype, torch_dtype = torch.float16, torch.float32
         mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_autocast":
-        compute_dtype = torch.bfloat16
-        torch_dtype = torch.float32
+        compute_dtype, torch_dtype = torch.bfloat16, torch.float32
         mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_buffers_autocast":
-        compute_dtype = torch.bfloat16
-        torch_dtype = torch.bfloat16
+        compute_dtype, torch_dtype = torch.bfloat16, torch.bfloat16
         mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
         load_param_skip_names = ['inv_freq']
     else:
         raise ValueError("Invalid precision")
 
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args["model_name"])
     tokenizer.pad_token_id = tokenizer.eos_token_id # TODO check if it exists first
 
-    # # Set up dataset
-    from datasets import Dataset, load_dataset
-    if args["dataset"] == "alpaca":
-        dataset = load_dataset("yahma/alpaca-cleaned")['train']
-    elif args["dataset"] == "alpaca_sample":
-        # dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:128]")
-    elif args["dataset"] == "dummy":
-        dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*16,
-            'input': ["input"]*16,
-            'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
-        )
-
-    dataset = InstructionDataset(dataset, tokenizer)
-    def collate_fn(batch):
-        # To list of tensors
-        input_ids = [torch.tensor(item['input_ids']) for item in batch]
-        attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
-        labels = [torch.tensor(item['labels']) for item in batch]
-        # Pad + truncate
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)[:, :args["context_length"]]
-        attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
-        labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
-        # Return dict
-        return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
-
-    # For distributed training, use DistributedSampler
-    sampler = DistributedSampler(dataset)
-
-    # Use the custom collate function in DataLoader
-    dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
+    # Set up dataloader
+    dataloader = get_dataloader(tokenizer, args)
 
 
     # Create model
-    use_flash_attn = args['use_flash_attention']
+    attn_impl = "flash_attention_2" if args['use_flash_attention'] else "sdpa" 
     print("Creating model", rank)
-    if args["train_type"] == "full" or args["train_type"] == "lora": # Full version
+    if args["train_type"] == "full" or args["train_type"] == "lora":
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
                 args["model_name"],
                 use_cache=False,
                 torch_dtype=torch_dtype,
-                _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
+                _attn_implementation=attn_impl
             )
-            # model.to(rank).to(torch_dtype) # Don't need, causes OOM. First load to cpu and then shard to GPU.
+            model.to(dtype=torch_dtype, device="cpu" if args["low_memory"] else rank)
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
-            cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
+            cfg._attn_implementation = attn_impl
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg)
             model.to(torch_dtype)
-
-    elif args["train_type"] == "hf_qlora": # Quantized version (bnb edited to use bfloat16 for storage)
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=False,
-            bnb_4bit_compute_dtype=compute_dtype
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            args["model_name"],
-            use_cache=False,
-            quantization_config=bnb_config,
-            _attn_implementation="flash_attention_2" if use_flash_attn else "sdpa"
-        )
-
     elif args["train_type"] in ["qlora", "custom_qlora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
-        cfg._attn_implementation = "flash_attention_2" if use_flash_attn else "sdpa"
+        cfg._attn_implementation = attn_impl
         # cfg.update(dict(num_hidden_layers=60)) # debug mode.
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -405,17 +493,21 @@ def fsdp_main(rank, world_size, args):
                 # This means the model probably doesn't have a safetensors file
                 raise e
 
-        # Load in the weights, using our custom load_param function which quantizes Params4bit on the fly
+        # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
+        # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
+        print("Loading model", rank)
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_param(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
-                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+                load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
+                                  is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+        # model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
+
     # PEFT setup (LoRA and QLoRA)
-    if args["train_type"] == "lora" or args["train_type"] == "qlora" or args["train_type"] == "hf_qlora":
+    if args["train_type"] in ["lora", "qlora"]:
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM, inference_mode=False,
             r=args["lora_rank"],
@@ -430,57 +522,20 @@ def fsdp_main(rank, world_size, args):
 
         model = get_peft_model(model, peft_config)
 
-        # And then setup_quantized_peft_meta_for_training returns quant_state.to back to normal
         if rank==0:
             model.print_trainable_parameters()
         elif args['low_memory']:
+            # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
     elif args["train_type"] == "custom_qlora":
-        # Create custom lora module
-        class QLORA(nn.Module):
-            def __init__(self, base_layer, device="cpu"):
-                super().__init__()
-                self.base_layer = base_layer
-                dtype = base_layer.compute_dtype
-                self.lora_A = nn.Linear(base_layer.in_features, args["lora_rank"], bias=False, device=device, dtype=dtype)
-                self.lora_B = nn.Linear(args["lora_rank"], base_layer.out_features, bias=False, device=device, dtype=dtype)
-                self.lora_alpha = args["lora_alpha"]
-                self.lora_dropout = nn.Dropout(args["lora_dropout"])
-                self.scaling = self.lora_alpha / args['lora_rank']
-
-            def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-
-                result = self.base_layer(x, *args, **kwargs)
-                # As per Tim Dettmers, for 4bit, we need to defensively clone here.
-                # The reason is that in some cases, an error can occur that backprop
-                # does not work on a manipulated view. This issue may be solved with
-                # newer PyTorch versions but this would need extensive testing to be
-                # sure.
-                result = result.clone()
-
-                requires_conversion = not torch.is_autocast_enabled()
-                if requires_conversion:
-                    expected_dtype = result.dtype
-                    x = x.to(self.lora_A.weight.dtype)
-
-                output = self.lora_B(self.lora_A(self.lora_dropout(x)))
-                if requires_conversion:
-                    output = output.to(expected_dtype)
-                output = output * self.scaling
-                
-                # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
-                result += output
-
-                return result
-            
+        # Create QLORA layers.  
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = QLORA(m)
+                qlora_layer = QLORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
-        
         for n,p in model.named_parameters():
             if any([lora_name in n for lora_name in ['lora_A', 'lora_B']]):
                 p.requires_grad = True
@@ -491,36 +546,7 @@ def fsdp_main(rank, world_size, args):
         
     args["logger"].log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
 
-    # Wrap the model
-    if args["wrapping_policy"] == "size":
-        # Wrapping policy: wrap anything with more than 8 parameters individually:
-        my_auto_wrap_policy = functools.partial(
-            size_based_auto_wrap_policy, min_num_params=8
-        )
-    else:
-        # Alternative: policy from llama-recipes:
-        from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
-        from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
-        # I think this checks for lora layers (has weight and requires_grad)
-        def lambda_policy_fn(module):
-            return (
-                len(list(module.named_children())) == 0
-                and getattr(module, "weight", None) is not None
-                and module.weight.requires_grad
-            )
-        lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
-        # And then this matches the rest?
-        transformer_layer_name = LlamaDecoderLayer
-        transformer_wrap_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls=(
-                PrefixEncoder,
-                PromptEncoder,
-                PromptEmbedding,
-                transformer_layer_name,
-            ),
-        )
-        my_auto_wrap_policy = functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+    my_auto_wrap_policy = create_default_auto_wrap_policy()
 
     print("Wrapping model w/ FSDP", rank)
     sharding_strategy = ShardingStrategy.FULL_SHARD if not args['use_ddp'] else ShardingStrategy.NO_SHARD
@@ -532,7 +558,7 @@ def fsdp_main(rank, world_size, args):
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
-        sync_module_states=args["low_memory"], # TODO low memory works with LoRA but not QLoRA
+        sync_module_states=args["low_memory"],
         param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
@@ -605,28 +631,13 @@ def fsdp_main(rank, world_size, args):
         print(model)
         print("Starting training")
 
-    # Create optimizer TODO more options here
-    if args["optimizer"] == "adam": optimizer = optim.Adam(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "sgd": optimizer = optim.SGD(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adadelta": optimizer = optim.Adadelta(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adamw": optimizer = torch.optim.AdamW(model.parameters(), lr=args['lr'], 
-                                                                     betas=(0.9,0.95), eps=1e-5, weight_decay=args['wd'])
-    else: raise ValueError("Invalid optimizer")
 
-    gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
+    # Create the optimizer
+    optimizer = get_optimizer(model, args)
 
     # LR scheduler.
-    num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
-    num_scheduler_steps = num_training_steps * dist.get_world_size()
-    num_warmup_steps = int(num_scheduler_steps * 0.1)
-    if args['lr_scheduler'] == "linear":
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_scheduler_steps)
-    elif args['lr_scheduler'] == "cosine":
-        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
-    elif args['lr_scheduler'] == "constant":
-        lr_scheduler = get_constant_schedule(optimizer)
-    else:
-        raise NotImplementedError(f"{args['lr_scheduler']} LR scheduler not implemented yet")
+    gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
+    lr_scheduler, num_training_steps = get_lr_scheduler(optimizer, dataloader, gradient_accumulation_steps, args)
 
     # Sanity check: see what parameters the optimizer has and which require grad:
     if rank == 0 and args['verbose']:
@@ -634,6 +645,7 @@ def fsdp_main(rank, world_size, args):
         for group in optimizer.param_groups:
             for param in group['params']:
                 print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+
 
     # Autocast for mixed precision with fp16/bf16 compute types with fp32 params
     if args["precision"] in ["fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]:
@@ -643,10 +655,12 @@ def fsdp_main(rank, world_size, args):
     scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
     scale_loss = scaler is not None
 
+
     # Train loop
     # TODO: no_sync() is needed to accumulate gradients with cpu offloading.
+    if rank == 0:
+        print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
-    if rank == 0: print("Total Training Steps:", num_training_steps)
     init_start_event.record()
     for epoch in range(args['num_epochs']):
         model.train()
@@ -663,7 +677,8 @@ def fsdp_main(rank, world_size, args):
             torch.cuda.reset_peak_memory_stats(rank)
 
             # Log memory usage
-            if batch_idx==0: args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx==0:
+                args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Forward pass
             with autocast:
@@ -678,7 +693,8 @@ def fsdp_main(rank, world_size, args):
             loss = loss / gradient_accumulation_steps
 
             # Log memory usage
-            if batch_idx==0: args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx==0:
+                args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Backward pass
             if scale_loss:
@@ -700,7 +716,8 @@ def fsdp_main(rank, world_size, args):
                 lr_scheduler.step()
                 progress_bar.update(1)
             # Log memory usage after backwards
-            if batch_idx==0: args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx==0:
+                args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Print + log peak memory usage for the whole first step of training
             if batch_idx==0:
@@ -755,6 +772,7 @@ def fsdp_main(rank, world_size, args):
     # Clean up
     dist.destroy_process_group()
 
+
 # Entry point, using fastcore's call_parse to parse args from command line and then calling fsdp_main
 @call_parse()
 def main(
@@ -769,24 +787,23 @@ def main(
     use_flash_attention: bool_arg = True, # Whether to use flash attention
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
-    low_memory: bool_arg = True, # Load model weights only on Rank 0 to reduce CPU memory usage. Currently works for LoRA but not for QLoRA.
+    low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16_buffers_autocast", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    save_model: bool_arg = False, # Whether to save the resulting model TODO
-    output_dir: str = "output", # Output directory to save results to TODO
+    save_model: bool_arg = False, # Whether to save the resulting model
+    output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules = "all", # If 'none', uses peft defaults. Use 'all' for our best guess for mistral+llama
-    verbose: bool_arg = True, # Whether to print extra info for debugging
+    verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adamw", # adam, sgd or adadelta
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
-    log_to: str = "wandb", # wandb or stdout
-    wrapping_policy: str = "llamarecipes", # "size" or "llamarecipes" to test different things TODO size doesn't work for QLoRA
+    log_to: str = "stdout", # wandb or stdout
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
