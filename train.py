@@ -254,7 +254,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
     if args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:128]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*16,
@@ -803,7 +803,7 @@ def main(
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     optimizer: str = "adamw", # adam, sgd or adadelta
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
-    log_to: str = "stdout", # wandb or stdout
+    log_to: str = "wandb", # wandb or stdout
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
