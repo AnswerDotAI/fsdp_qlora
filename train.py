@@ -318,7 +318,7 @@ def fsdp_main(rank, world_size, args):
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
         # dataset = load_dataset("yahma/alpaca-cleaned", split="train[:20]")
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:4096]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:128]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*16,

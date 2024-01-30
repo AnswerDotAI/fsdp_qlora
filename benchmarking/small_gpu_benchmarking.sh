@@ -81,6 +81,7 @@ python train.py --batch_size 1 --model_name codellama/CodeLlama-34b-hf --context
 python train.py --batch_size 2 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
 
 
+# Try with 4 GPUs.
 python train.py --batch_size 1 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
 # OOM on cpu. low memory needs to be fixed for lora model loading?
 python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
