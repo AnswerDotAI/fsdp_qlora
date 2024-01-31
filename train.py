@@ -632,7 +632,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
             # Record loss
             bs = batch['input_ids'].shape[0]
-            ddp_loss[0] += loss.item() * bs
+            ddp_loss[0] += loss.item() * bs * gradient_accumulation_steps
             ddp_loss[1] += bs
 
             # Step the optimizer (w/ gradient accumulation)
