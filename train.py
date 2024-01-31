@@ -319,12 +319,11 @@ def get_cosine_one_cycle_scheduler(optimizer:optim.Optimizer, num_warmup_steps:i
 def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:Dict):
     """Returns linear, cosine, or constant learning rate scheduler"""
     num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
-    num_scheduler_steps = num_training_steps * dist.get_world_size()
-    num_warmup_steps = int(num_scheduler_steps * 0.1)
+    num_warmup_steps = int(num_training_steps * 0.1)
     if args['lr_scheduler'] == "linear":
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_scheduler_steps)
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     elif args['lr_scheduler'] == "cosine":
-        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
+        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1)
     elif args['lr_scheduler'] == "constant":
         lr_scheduler = get_constant_schedule(optimizer)
     else:
