@@ -81,28 +81,33 @@ class Logger:
         if self.log_to == "wandb" and rank==0:
             import wandb
             wandb.init(project=project_name)
-            wandb.config.update(args)
-        elif self.log_to == "stdout":
-            print(args)
 
-    def log(self, d, rank=0):
+    def log(self, d:Dict, rank:int):
         if rank != 0: return
-        if self.log_to == "wandb": wandb.log(d)
-        elif self.log_to == "stdout": print(d)
+        if self.log_to == "tqdm":
+            for k,v in d.items():
+                tqdm.write(f'{k}: {v}')
+        elif self.log_to == "wandb":
+            wandb.log(d)
+        elif self.log_to == "stdout":
+            for k,v in d.items():
+                print(f'{k}: {v}')
 
     def finish(self, rank=0):
         if self.log_to == "wandb" and rank==0: wandb.finish()
 
 
-def clear_gpu_cache(rank:int|None=None):
-    """Clear the GPU cache for all ranks"""
+def update_progress_bar(progress_bar:tqdm, epoch:int, log_loss:float, log_lr:float, rank:int):
+    """Updates the progress bar with the current epoch, loss, and learning rate"""
     if rank == 0:
-        print("Clearing GPU cache for all ranks")
-    torch.cuda.empty_cache()
+        if log_lr >=0:
+            progress_bar.set_description(f"Epoch {epoch}, Loss {log_loss:.3f}, LR {log_lr:.2e}", refresh=True)
+        else:
+            progress_bar.set_description(f"Epoch {epoch}, Loss {log_loss:.3f}", refresh=True)
 
 
 # Utilities related to model loading
-def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:list[str]=["lm_head"], **kwargs):
+def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:List[str]=["lm_head"], **kwargs):
     """
     Replace linear modules with a new Linear module.
     Parameters:
@@ -343,7 +348,8 @@ def get_optimizer(model:nn.Module, args:dict):
 
 
 # Main function, run on each process
-def fsdp_main(rank:int, world_size:int, args:dict):
+def fsdp_main(rank:int, world_size:int, args:Dict):
+    print_func = tqdm.write if args["log_to"] == 'tqdm' else print
 
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
@@ -353,7 +359,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     torch.cuda.set_device(rank)
 
     # Start logging
-    args["logger"] = Logger(args, log_to=args["log_to"], rank=rank)
+    logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"], entity=args["entity"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
@@ -469,7 +475,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
 
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
 
-    args["logger"].log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
+    logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
 
 
     # Wrap the model (LoRA policy from llama-recipes):
@@ -510,7 +516,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
         mixed_precision=mp_policy,
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
-    args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
+    logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
 
     # Synchronize at the start
@@ -563,9 +569,12 @@ def fsdp_main(rank:int, world_size:int, args:dict):
         print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
+    log_loss, log_lr = 0.0, -1
     for epoch in range(args['num_epochs']):
+        update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
         model.train()
         ddp_loss = torch.zeros(2).to(rank)
+
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
@@ -585,8 +594,8 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             torch.cuda.reset_peak_memory_stats(rank)
 
             # Log memory usage
-            if batch_idx==0:
-                args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 0 and epoch == 0:
+                logger.log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Forward pass
             with sync_context:
@@ -602,8 +611,8 @@ def fsdp_main(rank:int, world_size:int, args:dict):
                 loss = loss / gradient_accumulation_steps
 
                 # Log memory usage
-                if batch_idx==0:
-                    args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+                if batch_idx == 0 and epoch == 0:
+                    logger.log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
                 # Backward pass
                 if scale_grads:
@@ -630,14 +639,16 @@ def fsdp_main(rank:int, world_size:int, args:dict):
                 progress_bar.update(1)
 
             # Log memory usage after backwards
-            if batch_idx==0:
-                args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 0 and epoch == 0:
+                logger.log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Print + log peak memory usage for the whole first step of training
-            if batch_idx==0:
+            if batch_idx == 0 and epoch == 0:
                 peak_memory = torch.cuda.max_memory_allocated(rank)
-                print(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
-                args["logger"].log({"memory_peak": peak_memory}, rank)
+                if args["verbose"]:
+                    print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
+                    if args["log_to"] == 'wandb':
+                        logger.log({"memory_peak": peak_memory}, rank)
 
             # Delete the output so more memory frees up before the next forward pass
             output = None
@@ -650,9 +661,13 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             # Log loss every gradient update steps
             if accumulate_grads:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
-                args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
+                if rank == 0:
+                    log_loss = ddp_loss[0] / ddp_loss[1]
+                    log_lr = lr_scheduler.get_last_lr()[0]
+                    update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
+                    if args["log_to"] == 'wandb':
+                        logger.log({"loss": log_loss, "lr": log_lr}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
-                args["logger"].log({"lr": lr_scheduler.get_last_lr()[0]}, rank)
 
     # Synchronize at the end and record time
     dist.barrier()
@@ -664,11 +679,11 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     # Print time and model
     if rank == 0:
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
-        print(f"CUDA event elapsed time: {time_taken} sec")
-        args["logger"].log({"time_taken": time_taken})
+        print_func(f"CUDA event elapsed time: {time_taken} sec")
+        logger.log({"time_taken": time_taken}, rank)
 
     # End logging
-    args["logger"].finish(rank=rank)
+    logger.finish(rank=rank)
 
     # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
     if args["save_model"]:
@@ -677,9 +692,9 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             cpu_state_dict = model.state_dict()
             os.makedirs(args["output_dir"], exist_ok=True)
             if rank==0:
-                print("Saving model")
+                print_func("Saving model")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                print("Done", rank)
+                print_func("Done", rank)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
