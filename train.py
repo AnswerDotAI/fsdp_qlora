@@ -75,12 +75,12 @@ except ImportError:
     pass
 
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp", rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
-            wandb.init(project=project_name)
+            wandb.init(project=project_name, entity=entity, config=args)
 
     def log(self, d:Dict, rank:int):
         if rank != 0: return
@@ -251,7 +251,7 @@ class InstructionDataset(Dataset):
         }
 
 # And to get the dataloader
-def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
+def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     """Creates a dataset and appropriate dataloader with distributed sampler."""
     # Importing here rather than at the start to avoid multiprocessing issues
     from datasets import Dataset, load_dataset
@@ -316,7 +316,7 @@ def get_cosine_one_cycle_scheduler(optimizer:optim.Optimizer, num_warmup_steps:i
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 
-def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:dict):
+def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:Dict):
     """Returns linear, cosine, or constant learning rate scheduler"""
     num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
     num_scheduler_steps = num_training_steps * dist.get_world_size()
@@ -333,7 +333,7 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 
 
 # Optimizer
-def get_optimizer(model:nn.Module, args:dict):
+def get_optimizer(model:nn.Module, args:Dict):
     """Returns an optimizer. We can add more options here if needed."""
     if args["optimizer"] == "adam":
         return optim.Adam(model.parameters(), lr=args['lr'])
@@ -706,34 +706,36 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: str = "lora", # "full", "lora", or "qlora"
+    train_type: Param("", choices=["full", "lora", "qlora"]) = "qlora", # "full", "lora", or "qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
     no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
-    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
+    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
-    lora_target_modules = "all", # If 'none', uses peft defaults. Use 'all' for our best guess for mistral+llama
+    lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for mistral+llama
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     grad_norm: float = 0.3, # Gradient norm clipping
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
-    optimizer: str = "adamw", # adam, sgd or adadelta
-    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
-    log_to: str = "stdout", # wandb or stdout
+    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
+    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+    log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
+    project_name: str = "fsdp_qlora", # For wandb logging
+    entity: str = None, # For wandb logging
 ):
 
     # Set world size
@@ -750,7 +752,7 @@ def main(
     # See peft.utils.constants -> TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING for the current defaults
     if lora_target_modules == "all":
         args["lora_target_modules"] = ["k_proj", "q_proj", "v_proj", "up_proj", "down_proj", "gate_proj"]
-    elif lora_target_modules.lower() == "none":
+    elif lora_target_modules.lower() == "default":
         args["lora_target_modules"] = None
 
     if args["precision"] in ["bf16", "bf16_autocast", "bf16_buffers_autocast"] and not torch.cuda.is_bf16_supported():
