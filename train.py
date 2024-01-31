@@ -450,7 +450,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
 
 
     # Create model
-    attn_impl = "flash_attention_2" if args['use_flash_attention'] else "sdpa" 
+    attn_impl = "sdpa" 
     print("Creating model", rank)
     if args["train_type"] == "full" or args["train_type"] == "lora":
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
