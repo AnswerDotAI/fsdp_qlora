@@ -16,7 +16,7 @@ python train.py --batch_size 24 --model_name meta-llama/Llama-2-7b-hf --context_
 python train.py --batch_size 24 --use_ddp True --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
 # Extremely slow.
 python train.py --batch_size 96 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
-# Same as before -> Check why bs is very low in qlora vs lora? Activation overhead?
+# Same as before -> Check why bs is very low in qlora vs lora? Activation overhead with large bs?
 python train.py --batch_size 30 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
 # Fine.
 python train.py --batch_size 4 --model_name meta-llama/Llama-2-7b-hf --context_length 256 --use_gradient_checkpointing False --train_type lora
@@ -85,12 +85,12 @@ python train.py --batch_size 1 --model_name codellama/CodeLlama-34b-hf --context
 python train.py --batch_size 2 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
 
 
-# Try with 4xA5000 GPUs. Model fits in mem. but can't train with seqlen=256.
-python train.py --batch_size 1 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
+# Try with 4xA5000 GPUs with 96 CPUs and 500GB RAM. Model fits in mem. but can't train with seqlen=256.
+python train.py --batch_size 2 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --train_type qlora
 # OOM on cpu. low memory needs to be fixed for lora model loading?
-python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
-python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
-python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
+python train.py --batch_size 1 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type lora
+python train.py --batch_size 4 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing True --use_cpu_offload True --train_type qlora
+python train.py --batch_size 1 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --train_type qlora
 # OOM on cpu.
-python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
-python train.py --batch_size 128 --model_name codellama/CodeLlama-34b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
+# python train.py --batch_size 128 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type lora
+python train.py --batch_size 1 --model_name meta-llama/Llama-2-70b-hf --context_length 256 --use_gradient_checkpointing False --use_cpu_offload True --train_type qlora
