@@ -24,6 +24,7 @@ import torch.multiprocessing as mp
 from contextlib import nullcontext
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
+from typing import List, Dict
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
@@ -74,34 +75,39 @@ except ImportError:
     pass
 
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp", rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
-            wandb.init(project=project_name)
-            wandb.config.update(args)
-        elif self.log_to == "stdout":
-            print(args)
+            wandb.init(project=project_name, entity=entity, config=args)
 
-    def log(self, d, rank=0):
+    def log(self, d:Dict, rank:int):
         if rank != 0: return
-        if self.log_to == "wandb": wandb.log(d)
-        elif self.log_to == "stdout": print(d)
+        if self.log_to == "tqdm":
+            for k,v in d.items():
+                tqdm.write(f'{k}: {v}')
+        elif self.log_to == "wandb":
+            wandb.log(d)
+        elif self.log_to == "stdout":
+            for k,v in d.items():
+                print(f'{k}: {v}')
 
     def finish(self, rank=0):
         if self.log_to == "wandb" and rank==0: wandb.finish()
 
 
-def clear_gpu_cache(rank:int|None=None):
-    """Clear the GPU cache for all ranks"""
+def update_progress_bar(progress_bar:tqdm, epoch:int, log_loss:float, log_lr:float, rank:int):
+    """Updates the progress bar with the current epoch, loss, and learning rate"""
     if rank == 0:
-        print("Clearing GPU cache for all ranks")
-    torch.cuda.empty_cache()
+        if log_lr >=0:
+            progress_bar.set_description(f"Epoch {epoch}, Loss {log_loss:.3f}, LR {log_lr:.2e}", refresh=True)
+        else:
+            progress_bar.set_description(f"Epoch {epoch}, Loss {log_loss:.3f}", refresh=True)
 
 
 # Utilities related to model loading
-def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:list[str]=["lm_head"], **kwargs):
+def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:List[str]=["lm_head"], **kwargs):
     """
     Replace linear modules with a new Linear module.
     Parameters:
@@ -245,7 +251,7 @@ class InstructionDataset(Dataset):
         }
 
 # And to get the dataloader
-def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
+def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     """Creates a dataset and appropriate dataloader with distributed sampler."""
     # Importing here rather than at the start to avoid multiprocessing issues
     from datasets import Dataset, load_dataset
@@ -261,6 +267,9 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
             'input': ["input"]*16,
             'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
         )
+
+    # truncate dataset so it's evenly divisible by grad_accumulation_steps
+    dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
 
     # Create the InstructionDataset (w/ prompt formatting)
     dataset = InstructionDataset(dataset, tokenizer)
@@ -279,7 +288,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:dict):
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
 
     # For distributed training, use DistributedSampler
-    sampler = DistributedSampler(dataset)
+    sampler = DistributedSampler(dataset, seed=args["seed"])
 
     # Use the custom collate function in DataLoader
     dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
@@ -307,15 +316,14 @@ def get_cosine_one_cycle_scheduler(optimizer:optim.Optimizer, num_warmup_steps:i
     )
     return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 
-def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:dict):
+def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:Dict):
     """Returns linear, cosine, or constant learning rate scheduler"""
     num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
-    num_scheduler_steps = num_training_steps * dist.get_world_size()
-    num_warmup_steps = int(num_scheduler_steps * 0.1)
+    num_warmup_steps = int(num_training_steps * 0.1)
     if args['lr_scheduler'] == "linear":
-        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_scheduler_steps)
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     elif args['lr_scheduler'] == "cosine":
-        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_scheduler_steps, min_lr_fraction=0.1)
+        lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1)
     elif args['lr_scheduler'] == "constant":
         lr_scheduler = get_constant_schedule(optimizer)
     else:
@@ -324,7 +332,7 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 
 
 # Optimizer
-def get_optimizer(model:nn.Module, args:dict):
+def get_optimizer(model:nn.Module, args:Dict):
     """Returns an optimizer. We can add more options here if needed."""
     if args["optimizer"] == "adam":
         return optim.Adam(model.parameters(), lr=args['lr'])
@@ -339,7 +347,8 @@ def get_optimizer(model:nn.Module, args:dict):
 
 
 # Main function, run on each process
-def fsdp_main(rank:int, world_size:int, args:dict):
+def fsdp_main(rank:int, world_size:int, args:Dict):
+    print_func = tqdm.write if args["log_to"] == 'tqdm' else print
 
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
@@ -349,7 +358,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     torch.cuda.set_device(rank)
 
     # Start logging
-    args["logger"] = Logger(args, log_to=args["log_to"], rank=rank)
+    logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"], entity=args["entity"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
@@ -465,7 +474,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
 
         print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
 
-    args["logger"].log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
+    logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
 
 
     # Wrap the model (LoRA policy from llama-recipes):
@@ -506,7 +515,7 @@ def fsdp_main(rank:int, world_size:int, args:dict):
         mixed_precision=mp_policy,
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
-    args["logger"].log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
+    logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
 
     # Synchronize at the start
@@ -551,21 +560,30 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     else:
         autocast = nullcontext()
     scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
-    scale_loss = scaler is not None
+    scale_grads = scaler is not None
 
 
     # Train loop
-    # TODO: no_sync() is needed to accumulate gradients with cpu offloading.
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
+    log_loss, log_lr = 0.0, -1
     for epoch in range(args['num_epochs']):
+        update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
         model.train()
         ddp_loss = torch.zeros(2).to(rank)
-        for batch_idx, batch in enumerate(dataloader):
 
-            if rank == 0 and args['verbose']: print(f"Epoch {epoch}, Batch {batch_idx}")
+        for batch_idx, batch in enumerate(dataloader):
+            accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
+
+            # Prevent gradient syncing until update step if using no_sync option.
+            # Documentation states this should only be used on the root FSDP instance
+            # We assume this is a one-node setup
+            if args['no_sync'] and not accumulate_grads:
+                sync_context = model.no_sync()
+            else:
+                sync_context = nullcontext()
 
             # Start logging memory (first iter) if requested
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
@@ -575,30 +593,31 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             torch.cuda.reset_peak_memory_stats(rank)
 
             # Log memory usage
-            if batch_idx==0:
-                args["logger"].log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 0 and epoch == 0:
+                logger.log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Forward pass
-            with autocast:
-                output = model(
-                    batch['input_ids'].to(rank),
-                    labels=batch['labels'].to(rank),
-                    attention_mask=batch['attention_mask'].to(rank)
-                )
-                loss = output.loss
+            with sync_context:
+                with autocast:
+                    output = model(
+                        batch['input_ids'].to(rank),
+                        labels=batch['labels'].to(rank),
+                        attention_mask=batch['attention_mask'].to(rank)
+                    )
+                    loss = output.loss
 
-            # Scale loss for gradient accumulation
-            loss = loss / gradient_accumulation_steps
+                # Scale loss for gradient accumulation
+                loss = loss / gradient_accumulation_steps
 
-            # Log memory usage
-            if batch_idx==0:
-                args["logger"].log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+                # Log memory usage
+                if batch_idx == 0 and epoch == 0:
+                    logger.log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
-            # Backward pass
-            if scale_loss:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+                # Backward pass
+                if scale_grads:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             # Record loss
             bs = batch['input_ids'].shape[0]
@@ -606,22 +625,29 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             ddp_loss[1] += bs
 
             # Step the optimizer (w/ gradient accumulation)
-            if batch_idx % gradient_accumulation_steps == 0:
+            if accumulate_grads:
                 if args['grad_norm'] is not None:
                     model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
-                optimizer.step()
+                if scale_grads:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()
                 progress_bar.update(1)
+
             # Log memory usage after backwards
-            if batch_idx==0:
-                args["logger"].log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 0 and epoch == 0:
+                logger.log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
 
             # Print + log peak memory usage for the whole first step of training
-            if batch_idx==0:
+            if batch_idx == 0 and epoch == 0:
                 peak_memory = torch.cuda.max_memory_allocated(rank)
-                print(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
-                args["logger"].log({"memory_peak": peak_memory}, rank)
+                if args["verbose"]:
+                    print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
+                    if args["log_to"] == 'wandb':
+                        logger.log({"memory_peak": peak_memory}, rank)
 
             # Delete the output so more memory frees up before the next forward pass
             output = None
@@ -632,11 +658,15 @@ def fsdp_main(rank:int, world_size:int, args:dict):
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
             # Log loss every gradient update steps
-            if batch_idx % gradient_accumulation_steps == 0:
+            if accumulate_grads:
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
-                args["logger"].log({"loss": ddp_loss[0] / ddp_loss[1]}, rank)
+                if rank == 0:
+                    log_loss = ddp_loss[0] / ddp_loss[1]
+                    log_lr = lr_scheduler.get_last_lr()[0]
+                    update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
+                    if args["log_to"] == 'wandb':
+                        logger.log({"loss": log_loss, "lr": log_lr}, rank)
                 ddp_loss = torch.zeros(2).to(rank)
-                args["logger"].log({"lr": lr_scheduler.get_last_lr()[0]}, rank)
 
     # Synchronize at the end and record time
     dist.barrier()
@@ -648,11 +678,11 @@ def fsdp_main(rank:int, world_size:int, args:dict):
     # Print time and model
     if rank == 0:
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
-        print(f"CUDA event elapsed time: {time_taken} sec")
-        args["logger"].log({"time_taken": time_taken})
+        print_func(f"CUDA event elapsed time: {time_taken} sec")
+        logger.log({"time_taken": time_taken}, rank)
 
     # End logging
-    args["logger"].finish(rank=rank)
+    logger.finish(rank=rank)
 
     # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
     if args["save_model"]:
@@ -661,9 +691,9 @@ def fsdp_main(rank:int, world_size:int, args:dict):
             cpu_state_dict = model.state_dict()
             os.makedirs(args["output_dir"], exist_ok=True)
             if rank==0:
-                print("Saving model")
+                print_func("Saving model")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                print("Done", rank)
+                print_func("Done", rank)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
@@ -675,33 +705,36 @@ def fsdp_main(rank:int, world_size:int, args:dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: str = "lora", # "full", "lora", or "qlora"
+    train_type: Param("", choices=["full", "lora", "qlora"]) = "qlora", # "full", "lora", or "qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
-    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # mixed precision training. "fp32", "bf16", "mp_fp16_autocast", "mp_bf16_autocast", "mp_bf16_buffers_autocast".
+    no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
+    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     save_model: bool_arg = False, # Whether to save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
-    lora_target_modules = "all", # If 'none', uses peft defaults. Use 'all' for our best guess for mistral+llama
+    lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for mistral+llama
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     grad_norm: float = 0.3, # Gradient norm clipping
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
-    optimizer: str = "adamw", # adam, sgd or adadelta
-    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # lr scheduler to use
-    log_to: str = "stdout", # wandb or stdout
+    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
+    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+    log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
+    project_name: str = "fsdp_qlora", # For wandb logging
+    entity: str = None, # For wandb logging
 ):
 
     # Set world size
@@ -718,11 +751,17 @@ def main(
     # See peft.utils.constants -> TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING for the current defaults
     if lora_target_modules == "all":
         args["lora_target_modules"] = ["k_proj", "q_proj", "v_proj", "up_proj", "down_proj", "gate_proj"]
-    elif lora_target_modules.lower() == "none":
+    elif lora_target_modules.lower() == "default":
         args["lora_target_modules"] = None
 
     if args["precision"] in ["bf16", "bf16_autocast", "bf16_buffers_autocast"] and not torch.cuda.is_bf16_supported():
         raise ValueError('Current device does not support bfloat16')
+
+    # Set no_sync if using cpu_offload and gradient accumulation. Turn off if not using gradient accumulation
+    if args["use_cpu_offload"] and args["gradient_accumulation_steps"] > 1:
+        args["no_sync"] = True
+    elif args["no_sync"] and args["gradient_accumulation_steps"] == 1:
+        args["no_sync"] = False
 
     # Run
     mp.spawn(fsdp_main,
