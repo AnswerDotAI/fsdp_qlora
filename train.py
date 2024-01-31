@@ -214,21 +214,27 @@ PROMPT_DICT = {
 
 # Dataset class
 class InstructionDataset(Dataset):
-    def __init__(self, dataset, tokenizer, partition="train"):
+    def __init__(self, dataset, tokenizer, style="alpaca"):
         self.dataset = dataset
         self.tokenizer = tokenizer
+        self.style = style
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, index):
         IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
-        ann = self.dataset[index]
-        if ann.get("input", "") == "":
-            prompt = PROMPT_DICT["prompt_no_input"].format_map(ann)
-        else:
-            prompt = PROMPT_DICT["prompt_input"].format_map(ann)
-        example = prompt + ann["output"]
+        if self.style == "guanaco":
+            prompt = self.dataset[index]["text"].split("### Assistant: ")[0]
+            example = self.dataset[index]["text"]
+        else: # Alpaca
+            ann = self.dataset[index]
+            if ann.get("input", "") == "":
+                prompt = PROMPT_DICT["prompt_no_input"].format_map(ann)
+            else:
+                prompt = PROMPT_DICT["prompt_input"].format_map(ann)
+            example = prompt + ann["output"]
+            
         prompt = torch.tensor(
             self.tokenizer.encode(prompt), dtype=torch.int64
         )
@@ -267,12 +273,17 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
             'input': ["input"]*16,
             'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
         )
+    elif args["dataset"] == "guanaco":
+        dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
 
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
-
-    # Create the InstructionDataset (w/ prompt formatting)
-    dataset = InstructionDataset(dataset, tokenizer)
+    
+    # # Create the InstructionDataset 
+    if args["dataset"] == "guanaco":
+        dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
+    else: # (w/ alpaca prompt formatting)
+        dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
 
     # Collate function
     def collate_fn(batch):
@@ -710,7 +721,7 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 20-sample test) or "dummy" for 16 long dummy samples
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
