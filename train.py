@@ -297,14 +297,17 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
 
     # Collate function
-    def collate_fn(batch):
+    def collate_fn(batch, with_attention_mask=False):
         # To list of tensors
         input_ids = [torch.tensor(item['input_ids']) for item in batch]
         attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
         labels = [torch.tensor(item['labels']) for item in batch]
         # Pad + truncate
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)[:, :args["context_length"]]
-        attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
+        if with_attention_mask:
+            attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
+        else:
+            attention_masks = None
         labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
         # Return dict
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
