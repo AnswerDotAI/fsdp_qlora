@@ -17,16 +17,10 @@ These instructions have also been tested with Cuda 11.7 & 12.1.
 - in bitsandbytes folder, `make CUDA_VERSION=118` then `python setup.py install` (may need export BNB_CUDA_VERSION=118 and to set cuda path)
 - pip install fastcore wandb
 - huggingface-cli login (to access Llama 2 7B)
-- back in fsdp_qlora folder, run `python train.py` to test lora train
+- back in fsdp_qlora folder, run `python train.py` to test qlora training
 
 Check out different combos of settings. For example,
-`python train.py --train_type qlora` to do qlora instead of the default lora
-
-NBs:
-
-- The low-memory option (loading on only one shard and using sync_module_states) works with LoRA but not QLoRA yet. 
-- size-based wrapping policy gave an error but I think it should work, will update if I get it going.
-- the undocumented train_type hf_qlora loads with the transformers load_in_4bit option, which by default gives a ValueError: Cannot flatten integer dtype tensors (since quant_storage default is uint8). If you manually edit the def of Linear4Bit to set the default to bf16 this should work (with size wrapping policy, the other one fails because something is fp16) and is a useful comparison for exploring what options we have if we want to avoid all the custom model loading stuff. Hmm after a fresh install this isn't working with the size-based wrapping either, "AssertionError: Expects storage to be allocated", I need to debug this.
+`python train.py --train_type lora` to do lora instead of the default qlora
 
 
 ## Mixed Precision Training
@@ -42,7 +36,7 @@ This will cast all the model parameters to `torch.float32` before training and w
 
 ### `--precision mp_fp16_autocast` (mixed float16 with autocast)
 
-This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with 
+This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with
 
 ```
 mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
@@ -53,7 +47,7 @@ As a results, sharded and unsharded params will be stored in fp32. It will use `
 
 ### `--precision mp_bf16_autocast` (mixed bfloat16 with autocast)
 
-This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with 
+This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with
 
 ```
 mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
@@ -64,7 +58,7 @@ As a results, sharded and unsharded params will be stored in fp32. It will use `
 
 ### `--precision mp_bf16_buffers_autocast` (bfloat16 params and float32 buffers with autocast)
 
-This will cast all the model parameters to `torch.bfloat16` before training but will keep the buffers in `torch.float32` and will use FSDP mixed precision with 
+This will cast all the model parameters to `torch.bfloat16` before training but will keep the buffers in `torch.float32` and will use FSDP mixed precision with
 
 ```
 mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
