@@ -1,9 +1,12 @@
 from datasets import load_dataset
-import torch
+import torch, os
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, AutoTokenizer
 from peft import LoraConfig
 from trl import SFTTrainer
 from transformers import TrainingArguments
+
+local_rank = os.getenv("LOCAL_RANK")
+device_string = "cuda:" + str(local_rank)
 
 # Load the dataset
 dataset_name = "timdettmers/openassistant-guanaco"
@@ -23,7 +26,8 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     quantization_config=bnb_config,
     trust_remote_code=True,
-    use_cache = False
+    use_cache = False,
+    device_map={'':device_string}
 )
 
 # PEFT config
@@ -43,8 +47,8 @@ peft_config = LoraConfig(
 # Args 
 max_seq_length = 512
 output_dir = "./results"
-per_device_train_batch_size = 8
-gradient_accumulation_steps = 2
+per_device_train_batch_size = 4
+gradient_accumulation_steps = 4
 optim = "adamw_hf"
 save_steps = 10
 logging_steps = 1
@@ -68,6 +72,7 @@ training_arguments = TrainingArguments(
     group_by_length=True,
     lr_scheduler_type=lr_scheduler_type,
     gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={'use_reentrant':False}, # Needed for DDP
     report_to="wandb",
 )
 
