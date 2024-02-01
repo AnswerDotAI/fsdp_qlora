@@ -607,7 +607,6 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    if rank == 0: print(model)
 
     # Synchronize at the start
     dist.barrier()
