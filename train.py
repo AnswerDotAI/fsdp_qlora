@@ -470,7 +470,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
 
     # Create model
-    attn_impl = "sdpa" 
+    attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     print("Creating model", rank)
     if args["train_type"] == "full" or args["train_type"] == "lora":
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
@@ -586,40 +586,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    if rank == 0: print(model)
-    # raise ValueError("Stop here")
-    # print("Embed Model dtype (WRAPPED MODEL)", model._fsdp_wrapped_module.base_model.model.model.embed_tokens.weight.dtype)
-    # print("Buffers dtype (WRAPPED MODEL)", next(model.buffers()).dtype)
-    # print("Params dtype (WRAPPED MODEL)", next(model.parameters()).dtype)
-    # print("Model Mixed precision", model.mixed_precision.param_dtype)
-    # print("LORA Mixed precision", model.mixed_precision.param_dtype)    
-    # # import pdb; pdb.set_trace()
-    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    # print("Decoder Mixed precision", decoder_layer.mixed_precision.param_dtype)
-    # print("Decoder FWD pre-hook:", decoder_layer._forward_pre_hooks)
-    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
-    # lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
-    
-    # print(f"rank: {rank}, lora layer dtypes and devices")
-    # print([(p.shape, p.dtype, p.device) for p in list(lora_layer.parameters())])
-   
-    # print(f"rank: {rank}, lora base layer dtypes and devices")
-    # print([lora_base_layer.weight.shape, lora_base_layer.weight.dtype, lora_base_layer.weight.device])
-    
-    
-    # save lora base layer weights to verify correct loading in all ranks.
-    # torch.save(lora_base_layer.state_dict(), f"data/lora_layer0_q_proj_base_layer_rank{rank}.pt")
-    # lora_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.lora_A
-    # print("Lora_A FWD pre-hook:", lora_layer._forward_pre_hooks)
-    # from torch.distributed.fsdp._common_utils import _is_fsdp_flattened
-    # # print([(p.shape, p.dtype, _is_fsdp_flattened(p)) for p in list(decoder_layer.parameters())])
-    # torch.save(lora_base_layer.quant_state, f"data/lora_layer0_q_proj_quant_state_rank{rank}.pt")
-    # save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
-    # with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-    #     cpu_state_dict = lora_base_layer.state_dict()
-    #     torch.save(cpu_state_dict, f"data/lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
-    
-        
+    if rank == 0: print(model)        
     # For mem-eff loading testing.
     # Summon module at each rank, and then save for comparsion.
     # Compare quant_state, params, and also compare it with original loaded model weights.
@@ -632,7 +599,6 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     
     # Synchronize at the start
     dist.barrier()
-    # raise ValueError("Stop here")
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
@@ -818,7 +784,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora"]) = "qlora", # "full", "lora", or "qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
