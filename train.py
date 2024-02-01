@@ -705,7 +705,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
             # Step the optimizer (w/ gradient accumulation)
             if accumulate_grads:
-                if args['grad_norm'] is not None:
+                if args['apply_gradient_clipping'] and (args['grad_norm'] is not None):
                     model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
                 if scale_grads:
                     scaler.step(optimizer)
@@ -807,6 +807,7 @@ def main(
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for mistral+llama
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
+    apply_gradient_clipping: bool_arg = False, # Whether to apply gradient clipping
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
