@@ -496,14 +496,16 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 torch_dtype=torch_dtype,
                 _attn_implementation=attn_impl
             )
-            model.to(dtype=torch_dtype, device="cpu" if args["low_memory"] else rank)
+            dtype = torch_dtype if args["precision"] == "bf16" else None
+            model.to(dtype=dtype, device="cpu" if args["low_memory"] else rank)
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
             cfg._attn_implementation = attn_impl
             with init_empty_weights():
-                model = AutoModelForCausalLM.from_config(cfg)
-            model.to(torch_dtype)
+                model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
+            if args["precision"] == "bf16":
+                model.to(torch_dtype)
     elif args["train_type"] in ["qlora", "custom_qlora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
@@ -537,7 +539,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             for name, param in weights.items():
                 load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
                                   is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
-        # model.to(torch_dtype)
+        if args["precision"] == "bf16":
+            model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
