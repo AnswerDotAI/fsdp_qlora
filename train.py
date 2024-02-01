@@ -336,7 +336,7 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
     elif args['lr_scheduler'] == "cosine":
         lr_scheduler = get_cosine_one_cycle_scheduler(optimizer, num_warmup_steps, num_training_steps, min_lr_fraction=0.1)
     elif args['lr_scheduler'] == "constant":
-        lr_scheduler = get_constant_schedule(optimizer)
+        lr_scheduler = None
     else:
         raise NotImplementedError(f"{args['lr_scheduler']} LR scheduler not implemented yet")
     return lr_scheduler, num_training_steps
@@ -713,7 +713,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 else:
                     optimizer.step()
                 optimizer.zero_grad()
-                lr_scheduler.step()
+                # avoid overhead when lr is constant.
+                if args['lr_scheduler'] != "constant":
+                    lr_scheduler.step()
                 progress_bar.update(1)
 
             # Log memory usage after backwards
