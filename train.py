@@ -599,8 +599,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
-
-    if rank == 0: print(model)        
+    
     # For mem-eff loading testing.
     # Summon module at each rank, and then save for comparsion.
     # Compare quant_state, params, and also compare it with original loaded model weights.
@@ -695,7 +694,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                     output = model(
                         batch['input_ids'].to(rank),
                         labels=batch['labels'].to(rank),
-                        attention_mask=batch['attention_mask'].to(rank)
+                        attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(rank),
                     )
                     loss = output.loss
 
@@ -728,7 +727,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                     optimizer.step()
                 optimizer.zero_grad()
                 # avoid overhead when lr is constant.
-                if args['lr_scheduler'] != "constant":
+                if lr_scheduler is not None:
                     lr_scheduler.step()
                 progress_bar.update(1)
 
@@ -757,7 +756,10 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
                 if rank == 0:
                     log_loss = ddp_loss[0] / ddp_loss[1]
-                    log_lr = lr_scheduler.get_last_lr()[0]
+                    if lr_scheduler is not None:
+                        log_lr = lr_scheduler.get_last_lr()[0]
+                    else:
+                        log_lr = args["lr"]
                     update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
                     if args["log_to"] == 'wandb':
                         logger.log({"loss": log_loss, "lr": log_lr}, rank)
@@ -805,7 +807,7 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     use_ddp: bool_arg = False, # Whether to use DDP instead of FSDP with full sharding
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
