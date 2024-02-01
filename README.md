@@ -1,21 +1,16 @@
 # fsdp_qlora
-Training LLMs with QLoRA + FSDP
 
-This is still a work-in-progress, but to start experimenting:
+Training LLMs with QLoRA + FSDP. This is a demo script, and still a work in progress. See the blog post (coming soon) for more information.
 
-- Install the llama-recipes requirements (we can test what's actually needed later)
-- Install our bnb version
-- Run with defaults: `python train.py`!
+## Installation:
 
-## Testing from a fresh jarvislabs/runpod instance:
-These instructions have also been tested with Cuda 11.7 & 12.1.
-
+The following steps should work (tested on cuda 11.7, 11.8 and 12.1):
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
-- `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes`
-- `pip uninstall bitsandbytes`
-- Clone AnswerDotAI/bitsandbytes & switch to `cuda_fix_quant_storage_dtype` branch `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
-- in bitsandbytes folder, `make CUDA_VERSION=118` then `python setup.py install` (may need export BNB_CUDA_VERSION=118 and to set cuda path)
-- pip install fastcore wandb
+- `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes` as an easy way to get most dependencies
+- `pip uninstall bitsandbytes` since for now it must be installed from source to have the necessary changes
+- Clone bitsandbytes (recent version has our changes) or clone AnswerDotAI/bitsandbytes & switch to `cuda_fix_quant_storage_dtype` branch `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
+- in bitsandbytes folder, `make CUDA_VERSION=118` then `python setup.py install` (may need export BNB_CUDA_VERSION=118 and to set cuda path, adjust to your preferred version)
+- `pip install fastcore wandb` as extra requirements above those in llama-recipes
 - huggingface-cli login (to access Llama 2 7B)
 - back in fsdp_qlora folder, run `python train.py` to test qlora training
 
@@ -65,3 +60,12 @@ mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat
 ```
 
 As a results, sharded and unsharded params will be stored in bf16. It will use `autocast(torch.bfloat16)` for forward and backward passes, and `autocast(torch.bfloat16)` for gradient reduction and updates. Buffers and only [eligible operations](https://pytorch.org/docs/stable/amp.html#cuda-ops-that-can-autocast-to-float16) in autocast will be performed in bf16.
+
+
+## Comparinson to an existing trainer
+![Screenshot 2024-02-01 083222](https://github.com/AnswerDotAI/fsdp_qlora/assets/6575163/97bb03fb-c2bb-4679-83ff-63a2e202826f)
+`hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version. 
+
+## Converting Saved Models
+
+If you specify `--save_model True` the adapter layers will be saved as a state dict. To convert to the regular huggingface format and upload to the hub, see: **Converting the State Dict.ipynb**
