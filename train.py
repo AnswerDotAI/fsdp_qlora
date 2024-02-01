@@ -599,7 +599,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
-    
+
+    if rank == 0: print(model)        
     # For mem-eff loading testing.
     # Summon module at each rank, and then save for comparsion.
     # Compare quant_state, params, and also compare it with original loaded model weights.
