@@ -227,6 +227,11 @@ class InstructionDataset(Dataset):
         if self.style == "guanaco":
             prompt = self.dataset[index]["text"].split("### Assistant: ")[0]
             example = self.dataset[index]["text"]
+        elif self.style == "qna":
+            prompt_template = "###Context:\n{context}\n###Question:\n{question}\n###Answer:\n"
+            sample = self.dataset[index]
+            prompt = prompt_template.format_map(sample)
+            example = prompt + sample['answer']
         else: # Alpaca
             ann = self.dataset[index]
             if ann.get("input", "") == "":
@@ -275,6 +280,10 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         )
     elif args["dataset"] == "guanaco":
         dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
+    elif args["dataset"] == "sql":
+        dataset = load_dataset("knowrohit07/know_sql")['validation']
+        dataset = dataset.shuffle(seed=42)
+        dataset = dataset.select(range(1000,len(dataset)))
 
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
@@ -282,6 +291,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     # # Create the InstructionDataset 
     if args["dataset"] == "guanaco":
         dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
+    elif args["dataset"] == "sql":
+        dataset = InstructionDataset(dataset, tokenizer, style="qna")
     else: # (w/ alpaca prompt formatting)
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
 
