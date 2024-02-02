@@ -399,10 +399,11 @@ def create_default_auto_wrap_policy():
 
 # Custom QLORA module.
 class QLORA(nn.Module):
-    def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout, device="cpu"):
+    def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout):
         super().__init__()
         self.base_layer = base_layer
         dtype = base_layer.compute_dtype
+        device = base_layer.device
         self.lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
         self.lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
         self.lora_alpha = lora_alpha
