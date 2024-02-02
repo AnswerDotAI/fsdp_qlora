@@ -37,7 +37,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # FSDP
 from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
 from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload, ShardingStrategy
 from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
@@ -57,6 +57,8 @@ from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
+# PEFT
+from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
 # For different model types, we'll want to import the right class for the
 # check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
@@ -239,7 +241,7 @@ class InstructionDataset(Dataset):
             else:
                 prompt = PROMPT_DICT["prompt_input"].format_map(ann)
             example = prompt + ann["output"]
-            
+
         prompt = torch.tensor(
             self.tokenizer.encode(prompt), dtype=torch.int64
         )
@@ -282,13 +284,13 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
     elif args["dataset"] == "sql":
         dataset = load_dataset("knowrohit07/know_sql")['validation']
-        dataset = dataset.shuffle(seed=42)
+        dataset = dataset.shuffle(seed=args["seed"])
         dataset = dataset.select(range(1000,len(dataset)))
 
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
-    
-    # # Create the InstructionDataset 
+
+    # # Create the InstructionDataset
     if args["dataset"] == "guanaco":
         dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
     elif args["dataset"] == "sql":
@@ -366,14 +368,13 @@ def get_optimizer(model:nn.Module, args:Dict):
     elif args["optimizer"] == "adadelta":
         return optim.Adadelta(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95), 
+        return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95),
                                  eps=1e-5, weight_decay=args['wd'])
     else:
         raise ValueError("Invalid optimizer")
-    
+
+
 # Wrap the model (LoRA policy from llama-recipes):
-from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
-from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 # This checks for lora layers (has weight and requires_grad)
 def create_default_auto_wrap_policy():
     def lambda_policy_fn(module):
@@ -394,6 +395,7 @@ def create_default_auto_wrap_policy():
         ),
     )
     return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+
 
 # Custom QLORA module.
 class QLORA(nn.Module):
@@ -426,11 +428,11 @@ class QLORA(nn.Module):
         if requires_conversion:
             output = output.to(expected_dtype)
         output = output * self.scaling
-        
-        # print(f"rank {rank} output shape {output.shape}, result shape {result.shape}")
+
         result += output
 
         return result
+
 
 # Main function, run on each process
 def fsdp_main(rank:int, world_size:int, args:Dict):
@@ -494,19 +496,21 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 torch_dtype=torch_dtype,
                 _attn_implementation=attn_impl
             )
-            model.to(dtype=torch_dtype, device="cpu" if args["low_memory"] else rank)
+            dtype = torch_dtype if args["precision"] == "bf16" else None
+            model.to(dtype=dtype, device="cpu" if args["low_memory"] else rank)
         else:
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
             cfg._attn_implementation = attn_impl
             with init_empty_weights():
-                model = AutoModelForCausalLM.from_config(cfg)
-            model.to(torch_dtype)
+                model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
+            if args["precision"] == "bf16":
+                model.to(torch_dtype)
     elif args["train_type"] in ["qlora", "custom_qlora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        # cfg.update(dict(num_hidden_layers=60)) # debug mode.
+
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
@@ -535,7 +539,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             for name, param in weights.items():
                 load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
                                   is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
-        # model.to(torch_dtype)
+        if args["precision"] == "bf16":
+            model.to(torch_dtype)
 
     print("Model created", rank, torch.cuda.memory_allocated(rank))
 
@@ -562,7 +567,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
     elif args["train_type"] == "custom_qlora":
-        # Create QLORA layers.  
+        # Create QLORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
@@ -580,6 +585,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
 
+
+    # Wrap model with llama-recipies LoRA policy
     my_auto_wrap_policy = create_default_auto_wrap_policy()
 
     print("Wrapping model w/ FSDP", rank)
@@ -600,17 +607,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
-    if rank == 0: print(model)        
-    # For mem-eff loading testing.
-    # Summon module at each rank, and then save for comparsion.
-    # Compare quant_state, params, and also compare it with original loaded model weights.
-    # decoder_layer = model._fsdp_wrapped_module.base_model.model.model.layers[0]
-    # lora_base_layer = decoder_layer._fsdp_wrapped_module.self_attn.q_proj.base_layer
-    # with FSDP.summon_full_params(decoder_layer, recurse=True, offload_to_cpu=True, rank0_only=False):
-    #     torch.save(lora_base_layer.quant_state, f"data/summoned_lora_layer0_q_proj_quant_state_rank{rank}.pt")
-    #     torch.save(list(lora_base_layer.parameters()), f"data/summoned_lora_layer0_q_proj_base_layer_params_rank{rank}.pt")
 
-    
     # Synchronize at the start
     dist.barrier()
 
