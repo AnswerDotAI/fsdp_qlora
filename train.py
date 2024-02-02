@@ -543,7 +543,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         if args["precision"] == "bf16":
             model.to(torch_dtype)
 
-    print("Model created", rank, torch.cuda.memory_allocated(rank))
+    print("Model created", rank)
 
 
     # PEFT setup (LoRA and QLoRA)
@@ -582,10 +582,6 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             else:
                 p.requires_grad = False
 
-        print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
-
-    logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
-
 
     # Wrap model with llama-recipies LoRA policy
     my_auto_wrap_policy = create_default_auto_wrap_policy()
@@ -606,7 +602,6 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         mixed_precision=mp_policy,
     )
     print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
-    logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
 
 
     # Synchronize at the start
@@ -660,6 +655,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
+
+    forward_times, backward_times, grad_norm_times, opt_step_times = [], [], [], []
+    opt_zero_times, lr_times = [], []
     for epoch in range(args['num_epochs']):
         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
         model.train()
@@ -676,19 +674,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             else:
                 sync_context = nullcontext()
 
-            # Start logging memory (first iter) if requested
-            if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
-                torch.cuda.memory._record_memory_history()
-
-            # Reset peak memory to track that
-            torch.cuda.reset_peak_memory_stats(rank)
-
-            # Log memory usage
-            if batch_idx == 0 and epoch == 0:
-                logger.log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
-
             # Forward pass
             with sync_context:
+                start = time.perf_counter()
                 with autocast:
                     output = model(
                         batch['input_ids'].to(rank),
@@ -696,19 +684,19 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                         attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(rank),
                     )
                     loss = output.loss
+                forward_times.append(time.perf_counter() - start)
 
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
 
-                # Log memory usage
-                if batch_idx == 0 and epoch == 0:
-                    logger.log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
 
                 # Backward pass
+                start = time.perf_counter()
                 if scale_grads:
                     scaler.scale(loss).backward()
                 else:
                     loss.backward()
+                backward_times.append(time.perf_counter() - start)
 
             # Record loss
             bs = batch['input_ids'].shape[0]
@@ -717,38 +705,31 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
             # Step the optimizer (w/ gradient accumulation)
             if accumulate_grads:
+                start = time.perf_counter()
                 if args['apply_gradient_clipping'] and (args['grad_norm'] is not None):
                     model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
+                    grad_norm_times.append(time.perf_counter() - start)
+                    start = time.perf_counter()
                 if scale_grads:
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     optimizer.step()
+                opt_step_times.append(time.perf_counter() - start)
+                start = time.perf_counter()
                 optimizer.zero_grad()
+                opt_zero_times.append(time.perf_counter() - start)
                 # avoid overhead when lr is constant.
                 if lr_scheduler is not None:
+                    start = time.perf_counter()
                     lr_scheduler.step()
+                    lr_times.append(time.perf_counter() - start)
                 progress_bar.update(1)
 
-            # Log memory usage after backwards
-            if batch_idx == 0 and epoch == 0:
-                logger.log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
-
-            # Print + log peak memory usage for the whole first step of training
-            if batch_idx == 0 and epoch == 0:
-                peak_memory = torch.cuda.max_memory_allocated(rank)
-                if args["verbose"]:
-                    print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
-                    if args["log_to"] == 'wandb':
-                        logger.log({"memory_peak": peak_memory}, rank)
 
             # Delete the output so more memory frees up before the next forward pass
             output = None
             loss = None
-
-            # Stop logging memory (first iter)
-            if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
-                torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
 
             # Log loss every gradient update steps
             if accumulate_grads:
@@ -776,6 +757,27 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
         print_func(f"CUDA event elapsed time: {time_taken} sec")
         logger.log({"time_taken": time_taken}, rank)
+
+    import numpy as np
+    logger.log({
+        "forward_mean_rank": np.mean(forward_times),
+        "forward_median": np.median(forward_times),
+        "forward_std": np.std(forward_times),
+        "backward_mean": np.mean(backward_times),
+        "backward_median": np.median(backward_times),
+        "backward_std": np.std(backward_times),
+        "opt_step_mean": np.mean(opt_step_times),
+        "opt_step_median": np.median(opt_step_times),
+        "opt_step_std": np.std(opt_step_times),
+        "opt_zero_mean": np.mean(opt_zero_times),
+        "opt_zero_median": np.median(opt_zero_times),
+        "opt_zero_std": np.std(opt_zero_times),
+    }, rank)
+    if len(grad_norm_times) > 0:
+        logger.log({"grad_norm_mean": np.mean(grad_norm_times), "grad_norm_median": np.median(grad_norm_times), "grad_norm_std": np.std(grad_norm_times)}, rank)
+    if len(lr_times) > 0:
+        logger.log({"lr_mean": np.mean(lr_times), "lr_median": np.median(lr_times), "lr_std": np.std(lr_times)}, rank)
+
 
     # End logging
     logger.finish(rank=rank)
