@@ -77,7 +77,7 @@ except ImportError:
     pass
 
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora_profiling", entity=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
@@ -760,7 +760,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     import numpy as np
     logger.log({
-        "forward_mean_rank": np.mean(forward_times),
+        "forward_mean": np.mean(forward_times),
         "forward_median": np.median(forward_times),
         "forward_std": np.std(forward_times),
         "backward_mean": np.mean(backward_times),
