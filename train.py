@@ -13,6 +13,7 @@ Not all combinations of arguments will work. See the accompanying blog post for 
 # Imports
 
 # General
+from warnings import warn
 import torch, os, gc, time, safetensors, copy, math, types
 import functools
 import torch.optim as optim
@@ -76,13 +77,20 @@ try:
 except ImportError:
     pass
 
+try:
+    import optimi
+    OPTIMI = True
+except ImportError:
+    OPTIMI = False
+    pass
+
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora_profiling", entity=None, rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora_profiling", entity=None, run_name=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
-            wandb.init(project=project_name, entity=entity, config=args)
+            wandb.init(name=run_name, project=project_name, entity=entity, config=args)
 
     def log(self, d:Dict, rank:int):
         if rank != 0: return
@@ -364,7 +372,10 @@ def get_optimizer(model:nn.Module, args:Dict):
     if args["optimizer"] == "adam":
         return optim.Adam(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "sgd":
-        return optim.SGD(model.parameters(), lr=args['lr'])
+        if OPTIMI:
+            return optimi.SGD(model.parameters(), lr=args['lr'], gradient_release=args['gradient_release'])
+        else:
+            return optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta":
         return optim.Adadelta(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adamw":
@@ -447,7 +458,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     torch.cuda.set_device(rank)
 
     # Start logging
-    logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"], entity=args["entity"], rank=rank)
+    logger = Logger(args, log_to=args["log_to"], run_name=args["run_name"],
+                    project_name=args["project_name"], entity=args["entity"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
@@ -488,7 +500,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     # Create model
     attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
-    print("Creating model", rank)
+    if rank == 0:
+        print("Creating model", rank)
     if args["train_type"] == "full" or args["train_type"] == "lora":
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
@@ -534,16 +547,17 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
-        print("Loading model", rank)
-        for filename in files:
+        if rank == 0:
+            print_func(f"Loading model {rank}")
+        for filename in tqdm(files, desc="Loading & Quantizing Model", unit="Shards", disable=rank != 0):
             weights = safetensors.torch.load_file(filename)
-            for name, param in weights.items():
+            for name, param in tqdm(weights.items(), desc="Loading & Quantizing Weights", unit="Layers", disable=rank != 0):
                 load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
                                   is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         if args["precision"] == "bf16":
             model.to(torch_dtype)
-
-    print("Model created", rank)
+    if rank == 0:
+        print_func(f"Model created {rank}")
 
 
     # PEFT setup (LoRA and QLoRA)
@@ -586,13 +600,14 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     # Wrap model with llama-recipies LoRA policy
     my_auto_wrap_policy = create_default_auto_wrap_policy()
 
-    print("Wrapping model w/ FSDP", rank)
+    if rank == 0:
+        print("Wrapping model w/ FSDP", rank)
     sharding_strategy = ShardingStrategy.FULL_SHARD if not args['use_ddp'] else ShardingStrategy.NO_SHARD
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
-        use_orig_params=False,
+        use_orig_params=args["gradient_release"] or args["use_orig_params"],
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
@@ -601,7 +616,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
     )
-    print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
+    if rank == 0:
+        print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
 
 
     # Synchronize at the start
@@ -614,7 +630,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
         check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
-        print("Applying activation checkpointing", rank)
+        if rank==0:
+            print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
         )
@@ -627,6 +644,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     # Create the optimizer
     optimizer = get_optimizer(model, args)
+    if args["gradient_release"]:
+        if OPTIMI:
+            optimi.prepare_for_gradient_release(model, optimizer)
 
     # LR scheduler.
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -710,15 +730,17 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                     model.clip_grad_norm_(args['grad_norm'], norm_type=2.0)
                     grad_norm_times.append(time.perf_counter() - start)
                     start = time.perf_counter()
-                if scale_grads:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                opt_step_times.append(time.perf_counter() - start)
-                start = time.perf_counter()
-                optimizer.zero_grad()
-                opt_zero_times.append(time.perf_counter() - start)
+                # gradient_release fuses the optimizer and zero_grad steps during the backward pass
+                if not args["gradient_release"]:
+                    if scale_grads:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    opt_step_times.append(time.perf_counter() - start)
+                    start = time.perf_counter()
+                    optimizer.zero_grad()
+                    opt_zero_times.append(time.perf_counter() - start)
                 # avoid overhead when lr is constant.
                 if lr_scheduler is not None:
                     start = time.perf_counter()
@@ -750,10 +772,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     torch.cuda.synchronize()
     init_end_event.record()
 
-    print("Finished training", rank)
-
     # Print time and model
     if rank == 0:
+        print("Finished training", rank)
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
         print_func(f"CUDA event elapsed time: {time_taken} sec")
         logger.log({"time_taken": time_taken}, rank)
@@ -766,15 +787,13 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         "backward_mean": np.mean(backward_times),
         "backward_median": np.median(backward_times),
         "backward_std": np.std(backward_times),
-        "opt_step_mean": np.mean(opt_step_times),
-        "opt_step_median": np.median(opt_step_times),
-        "opt_step_std": np.std(opt_step_times),
-        "opt_zero_mean": np.mean(opt_zero_times),
-        "opt_zero_median": np.median(opt_zero_times),
-        "opt_zero_std": np.std(opt_zero_times),
     }, rank)
     if len(grad_norm_times) > 0:
         logger.log({"grad_norm_mean": np.mean(grad_norm_times), "grad_norm_median": np.median(grad_norm_times), "grad_norm_std": np.std(grad_norm_times)}, rank)
+    if len(opt_step_times) > 0:
+        logger.log({"opt_step_mean": np.mean(opt_step_times), "opt_step_median": np.median(opt_step_times), "opt_step_std": np.std(opt_step_times)}, rank)
+    if len(opt_zero_times) > 0:
+        logger.log({"opt_zero_mean": np.mean(opt_zero_times), "opt_zero_median": np.median(opt_zero_times), "opt_zero_std": np.std(opt_zero_times)}, rank)
     if len(lr_times) > 0:
         logger.log({"lr_mean": np.mean(lr_times), "lr_median": np.median(lr_times), "lr_std": np.std(lr_times)}, rank)
 
@@ -828,12 +847,15 @@ def main(
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
+    use_orig_params: bool_arg = False, # Wether the optimizer step runs on the original parameters or sharded parameters. `gradient_release` sets this to True.
     optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+    gradient_release: bool_arg = False, # Fuse optimizer step with backward pass. Requires installing optimi from source.
     log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
+    run_name: str = None, # For wandb logging
     project_name: str = "fsdp_qlora", # For wandb logging
     entity: str = None, # For wandb logging
 ):
@@ -863,6 +885,15 @@ def main(
         args["no_sync"] = True
     elif args["no_sync"] and args["gradient_accumulation_steps"] == 1:
         args["no_sync"] = False
+
+    if args['apply_gradient_clipping'] and args["gradient_release"]:
+        raise ValueError("apply_gradient_clipping and gradient_release cannot be used together")
+
+    if args["gradient_release"] and args["optimizer"]!="sgd" and not OPTIMI:
+        warn("gradient_release=True requires installing optimi from source and using SGD optimizer. Continuing with PyTorch optimizer")
+
+    if args["precision"] == "fp16_autocast" and args["gradient_release"]:
+        raise ValueError("gradient_release=True does not support fp16 mixed precision: precision=fp16_autocast")
 
     # Run
     mp.spawn(fsdp_main,
