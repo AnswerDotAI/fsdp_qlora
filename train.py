@@ -281,7 +281,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     if args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:128]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split=f"train[:{args['alpaca_sample_size']}]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*16,
@@ -552,9 +552,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
         if rank == 0:
             print_func(f"Loading model {rank}")
-        for filename in tqdm(files, desc="Loading & Quantizing Model", unit="Shards", disable=rank != 0):
+        for filename in tqdm(files, desc="Loading & Quantizing Model", unit="Shards", disable=rank!=0, position=0):
             weights = safetensors.torch.load_file(filename)
-            for name, param in tqdm(weights.items(), desc="Loading & Quantizing Weights", unit="Layers", disable=rank != 0):
+            for name, param in tqdm(weights.items(), desc="Loading & Quantizing Weights", unit="Layers", disable=rank!=0, position=1, leave=False):
                 load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
                                   is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         if args["precision"] == "bf16":
@@ -605,7 +605,23 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     if rank == 0:
         print("Wrapping model w/ FSDP", rank)
-    sharding_strategy = ShardingStrategy.FULL_SHARD if not args['use_ddp'] else ShardingStrategy.NO_SHARD
+
+    if args["sharding_strategy"] == "no_shard" or args['use_ddp']:
+        sharding_strategy = ShardingStrategy.NO_SHARD
+    elif args["sharding_strategy"] == "full":
+        sharding_strategy = ShardingStrategy.FULL_SHARD
+    elif args["sharding_strategy"] == "grad_op":
+        sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
+    elif args["sharding_strategy"] == "hybrid_zero2":
+        sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+
+    if args["backward_prefetch"] == "none":
+        backward_prefetch = None
+    elif args["backward_prefetch"] == "pre":
+        backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+    elif args["backward_prefetch"] == "post":
+        backward_prefetch = BackwardPrefetch.BACKWARD_POST
+
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
@@ -615,6 +631,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
         sync_module_states=args["low_memory"],
+        backward_prefetch=backward_prefetch,
+        forward_prefetch=args["forward_prefetch"],
         param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
@@ -831,6 +849,10 @@ def main(
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    alpaca_sample_size: int = 128, # Number of samples to use if using alpaca_sample
+    sharding_strategy: Param("", choices=["no_shard", "full", "grad_op", "hybrid_zero2"]) = "full", # Sharding strategy for FSDP
+    backward_prefetch: Param("", choices=["none", "pre", "post"]) = "none", # Whether to prefetch backward pass
+    forward_prefetch: bool_arg = False, # Whether to prefetch forward pass
     use_ddp: bool_arg = False, # Whether to use DDP instead of FSDP with full sharding
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
