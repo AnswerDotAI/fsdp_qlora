@@ -381,6 +381,9 @@ def get_optimizer(model:nn.Module, args:Dict):
     elif args["optimizer"] == "adamw":
         return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95),
                                  eps=1e-5, weight_decay=args['wd'])
+    elif args["optimizer"] == "stableadamw" and OPTIMI:
+        return optimi.StableAdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95),
+                                  eps=1e-5, weight_decay=args['wd'])
     else:
         raise ValueError("Invalid optimizer")
 
@@ -848,7 +851,7 @@ def main(
     wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
     use_orig_params: bool_arg = False, # Wether the optimizer step runs on the original parameters or sharded parameters. `gradient_release` sets this to True.
-    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
+    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta", "stableadamw"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
     gradient_release: bool_arg = False, # Fuse optimizer step with backward pass. Requires installing optimi from source.
     log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
@@ -891,6 +894,9 @@ def main(
 
     if args["gradient_release"] and args["optimizer"]!="sgd" and not OPTIMI:
         warn("gradient_release=True requires installing optimi from source and using SGD optimizer. Continuing with PyTorch optimizer")
+
+    if args["optimizer"] == "stableadamw" and not OPTIMI:
+        raise ValueError("stableadamw optimizer requires installing optimi: pip install torch-optimi")
 
     if args["precision"] == "fp16_autocast" and args["gradient_release"]:
         raise ValueError("gradient_release=True does not support fp16 mixed precision: precision=fp16_autocast")
