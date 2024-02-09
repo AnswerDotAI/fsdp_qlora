@@ -11,7 +11,7 @@ Not all combinations of arguments will work. See the accompanying blog post for 
 """
 
 # Imports
-
+import sys
 # General
 from warnings import warn
 import torch, os, gc, time, safetensors, copy, math, types
@@ -85,12 +85,12 @@ except ImportError:
     pass
 
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora_profiling", entity=None, run_name=None, rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora_profiling", entity=None, run_name=None, group=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
-            wandb.init(name=run_name, project=project_name, entity=entity, config=args)
+            wandb.init(name=run_name, project=project_name, entity=entity, group=group, config=args)
 
     def log(self, d:Dict, rank:int):
         if rank != 0: return
@@ -281,12 +281,12 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     if args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split=f"train[:{args['alpaca_sample_size']}]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split=f"train[:{args['sample_size']}]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*16,
-            'input': ["input"]*16,
-            'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
+            'instruction': ["instruction"]*args['sample_size'],
+            'input': ["input"]*args['sample_size'],
+            'output': ["output"*10000]*args['sample_size']} # A long output to test memory usage (gets truncated)
         )
     elif args["dataset"] == "guanaco":
         dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
@@ -459,10 +459,6 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
 
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
-
-    # Start logging
-    logger = Logger(args, log_to=args["log_to"], run_name=args["run_name"],
-                    project_name=args["project_name"], entity=args["entity"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
@@ -689,6 +685,9 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
     scale_grads = scaler is not None
 
+    # Start logging
+    logger = Logger(args, log_to=args["log_to"], run_name=args["run_name"],
+                    project_name=args["project_name"], entity=args["entity"], rank=rank)
 
     # Train loop
     if rank == 0:
@@ -848,8 +847,8 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
-    alpaca_sample_size: int = 128, # Number of samples to use if using alpaca_sample
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "dummy", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    sample_size: int = 128, # Number of samples to use if using alpaca_sample or dummy
     sharding_strategy: Param("", choices=["no_shard", "full", "grad_op", "hybrid_zero2"]) = "full", # Sharding strategy for FSDP
     backward_prefetch: Param("", choices=["none", "pre", "post"]) = "none", # Whether to prefetch backward pass
     forward_prefetch: bool_arg = False, # Whether to prefetch forward pass
@@ -881,6 +880,7 @@ def main(
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
     run_name: str = None, # For wandb logging
+    group: str = None, # For wandb logging
     project_name: str = "fsdp_qlora", # For wandb logging
     entity: str = None, # For wandb logging
 ):
@@ -924,7 +924,12 @@ def main(
         raise ValueError("gradient_release=True does not support fp16 mixed precision: precision=fp16_autocast")
 
     # Run
-    mp.spawn(fsdp_main,
-        args=(world_size, args),
-        nprocs=world_size,
-        join=True)
+    try:
+        mp.spawn(fsdp_main,
+            args=(world_size, args),
+            nprocs=world_size,
+            join=True)
+    except Exception as e:
+        sys.exit(1)
+    else:
+        sys.exit(0)
