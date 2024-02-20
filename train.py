@@ -273,7 +273,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     if args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:128]")
+        dataset = load_dataset("yahma/alpaca-cleaned", split="train[:512]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*16,
@@ -433,18 +433,40 @@ class QLORA(nn.Module):
         result += output
 
         return result
+    
+
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+    # first estimate the number of flops we do per iteration.
+    # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    # express our flops throughput as ratio of A100 bfloat16 peak flops
+    flops_achieved = flops_per_iter * (1.0/dt) # per second
+    flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
 
 
 # Main function, run on each process
-def fsdp_main(rank:int, world_size:int, args:Dict):
+def fsdp_main(local_rank:int, world_size:int, args:Dict):
     print_func = tqdm.write if args["log_to"] == 'tqdm' else print
 
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
     os.environ['MASTER_PORT'] = args["master_port"]
-
+    if 'SLURM_PROCID' in os.environ:
+        # assumes same number of GPUs per node.
+        rank = int(os.environ['SLURM_PROCID']) * torch.cuda.device_count() + local_rank
+    else:
+        rank = local_rank
+    
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+    torch.cuda.set_device(local_rank)
 
     # Start logging
     logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"], entity=args["entity"], rank=rank)
@@ -538,12 +560,12 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_and_quantize(model, name, param, dtype=torch_dtype, device=rank, skip_names=load_param_skip_names,
+                load_and_quantize(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                                   is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         if args["precision"] == "bf16":
             model.to(torch_dtype)
 
-    print("Model created", rank, torch.cuda.memory_allocated(rank))
+    print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
 
     # PEFT setup (LoRA and QLoRA)
@@ -582,16 +604,28 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             else:
                 p.requires_grad = False
 
-        print("LoRA layers added", rank, torch.cuda.memory_allocated(rank))
+        print("LoRA layers added", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
-    logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(rank)}, rank)
+    logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(local_rank)}, rank)
 
 
     # Wrap model with llama-recipies LoRA policy
     my_auto_wrap_policy = create_default_auto_wrap_policy()
 
     print("Wrapping model w/ FSDP", rank)
-    sharding_strategy = ShardingStrategy.FULL_SHARD if not args['use_ddp'] else ShardingStrategy.NO_SHARD
+    if args["sharding_strategy"] == "full_shard":
+        sharding_strategy = ShardingStrategy.FULL_SHARD
+    elif args["sharding_strategy"] == "shard_grad_op":
+        sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
+    elif args["sharding_strategy"] == "ddp":
+        sharding_strategy = ShardingStrategy.NO_SHARD
+    elif args["sharding_strategy"] == "hybrid_full_shard":
+        sharding_strategy = ShardingStrategy.HYBRID_SHARD
+    elif args["sharding_strategy"] == "hybrid_shard_grad_op":
+        sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+    else:
+        raise ValueError("Invalid FSDP sharding strategy")
+        
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
@@ -605,8 +639,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
     )
-    print("Wrapped model", rank, torch.cuda.memory_allocated(rank))
-    logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(rank)}, rank)
+    print("Wrapped model", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
+    logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank)
 
 
     # Synchronize at the start
@@ -663,7 +697,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
     for epoch in range(args['num_epochs']):
         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
         model.train()
-        ddp_loss = torch.zeros(2).to(rank)
+        ddp_loss = torch.zeros(2).to(local_rank)
 
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
@@ -681,19 +715,19 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 torch.cuda.memory._record_memory_history()
 
             # Reset peak memory to track that
-            torch.cuda.reset_peak_memory_stats(rank)
+            torch.cuda.reset_peak_memory_stats(local_rank)
 
             # Log memory usage
-            if batch_idx == 0 and epoch == 0:
-                logger.log({"memory_before_forward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 4 and epoch == 0:
+                logger.log({"memory_before_forward": torch.cuda.memory_allocated(local_rank)/1e9}, rank)
 
             # Forward pass
             with sync_context:
                 with autocast:
                     output = model(
-                        batch['input_ids'].to(rank),
-                        labels=batch['labels'].to(rank),
-                        attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(rank),
+                        batch['input_ids'].to(local_rank),
+                        labels=batch['labels'].to(local_rank),
+                        attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(local_rank),
                     )
                     loss = output.loss
 
@@ -701,8 +735,8 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 loss = loss / gradient_accumulation_steps
 
                 # Log memory usage
-                if batch_idx == 0 and epoch == 0:
-                    logger.log({"memory_after_forward": torch.cuda.memory_allocated(rank)}, rank)
+                if batch_idx == 4 and epoch == 0:
+                    logger.log({"memory_after_forward": torch.cuda.memory_allocated(local_rank)/1e9}, rank)
 
                 # Backward pass
                 if scale_grads:
@@ -731,12 +765,12 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                 progress_bar.update(1)
 
             # Log memory usage after backwards
-            if batch_idx == 0 and epoch == 0:
-                logger.log({"memory_after_backward": torch.cuda.memory_allocated(rank)}, rank)
+            if batch_idx == 4 and epoch == 0:
+                logger.log({"memory_after_backward": torch.cuda.memory_allocated(local_rank)/1e9}, rank)
 
             # Print + log peak memory usage for the whole first step of training
-            if batch_idx == 0 and epoch == 0:
-                peak_memory = torch.cuda.max_memory_allocated(rank)
+            if batch_idx == 4 and epoch == 0:
+                peak_memory = torch.cuda.max_memory_allocated(local_rank)
                 if args["verbose"]:
                     print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
                     if args["log_to"] == 'wandb':
@@ -762,7 +796,7 @@ def fsdp_main(rank:int, world_size:int, args:Dict):
                     update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
                     if args["log_to"] == 'wandb':
                         logger.log({"loss": log_loss, "lr": log_lr}, rank)
-                ddp_loss = torch.zeros(2).to(rank)
+                ddp_loss = torch.zeros(2).to(local_rank)
 
     # Synchronize at the end and record time
     dist.barrier()
@@ -807,7 +841,7 @@ def main(
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
-    use_ddp: bool_arg = False, # Whether to use DDP instead of FSDP with full sharding
+    sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
@@ -865,5 +899,5 @@ def main(
     # Run
     mp.spawn(fsdp_main,
         args=(world_size, args),
-        nprocs=world_size,
+        nprocs=torch.cuda.device_count(),
         join=True)
