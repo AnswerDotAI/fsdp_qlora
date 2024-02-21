@@ -43,6 +43,7 @@ from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.distributed.fsdp import StateDictType, FullStateDictConfig
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
+    offload_wrapper,
     CheckpointImpl,
     apply_activation_checkpointing,
 )
@@ -62,7 +63,7 @@ from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
 # For different model types, we'll want to import the right class for the
 # check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
 # Set the target class for activation checkpointing here:
 GC_LAYER_CLASS = LlamaDecoderLayer
@@ -276,9 +277,9 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("yahma/alpaca-cleaned", split="train[:512]")
     elif args["dataset"] == "dummy":
         dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*16,
-            'input': ["input"]*16,
-            'output': ["output"*10000]*16} # A long output to test memory usage (gets truncated)
+            'instruction': ["instruction"]*512,
+            'input': ["input"]*512,
+            'output': ["output"*10000]*512} # A long output to test memory usage (gets truncated)
         )
     elif args["dataset"] == "guanaco":
         dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
@@ -376,14 +377,43 @@ def get_optimizer(model:nn.Module, args:Dict):
 
 # Wrap the model (LoRA policy from llama-recipes):
 # This checks for lora layers (has weight and requires_grad)
+# def create_default_auto_wrap_policy():
+#     def lambda_policy_fn(module):
+#         return (
+#             len(list(module.named_children())) == 0
+#             and getattr(module, "weight", None) is not None
+#             and module.weight.requires_grad
+#         )
+#     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
+#     transformer_layer_name = LlamaDecoderLayer
+#     transformer_wrap_policy = functools.partial(
+#         transformer_auto_wrap_policy,
+#         transformer_layer_cls=(
+#             PrefixEncoder,
+#             PromptEncoder,
+#             PromptEmbedding,
+#             transformer_layer_name,
+#         ),
+#     )
+#     return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+
 def create_default_auto_wrap_policy():
     def lambda_policy_fn(module):
-        return (
-            len(list(module.named_children())) == 0
-            and getattr(module, "weight", None) is not None
-            and module.weight.requires_grad
-        )
+        # LORA trainable layers.
+        return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
+    
+    def self_attn_policy_fn(module):
+        # Check module name is self_attn.
+        return isinstance(module, tuple(LLAMA_ATTENTION_CLASSES.values()))
+    
+    def mlp_policy_fn(module):
+        # Check module name is self_attn.
+        return isinstance(module, LlamaMLP)
+        
+    
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
+    self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
+    mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
     transformer_layer_name = LlamaDecoderLayer
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
@@ -394,7 +424,9 @@ def create_default_auto_wrap_policy():
             transformer_layer_name,
         ),
     )
-    return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+    return functools.partial(_or_policy, policies=[lambda_policy, 
+                                                   transformer_wrap_policy, 
+                                                   self_attn_policy, mlp_policy])
 
 
 # Custom QLORA module.
@@ -403,9 +435,11 @@ class QLORA(nn.Module):
         super().__init__()
         self.base_layer = base_layer
         dtype = base_layer.compute_dtype
-        device = base_layer.device
-        self.lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
-        self.lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
+        device = base_layer.weight.device
+        lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
+        lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
+        self.lora_AB = nn.Sequential(lora_A, lora_B)
+        
         self.lora_alpha = lora_alpha
         self.lora_dropout = nn.Dropout(lora_dropout)
         self.scaling = self.lora_alpha / lora_rank
@@ -423,9 +457,9 @@ class QLORA(nn.Module):
         requires_conversion = not torch.is_autocast_enabled()
         if requires_conversion:
             expected_dtype = result.dtype
-            x = x.to(self.lora_A.weight.dtype)
+            x = x.to(next(iter(self.lora_AB)).weight.dtype)
 
-        output = self.lora_B(self.lora_A(self.lora_dropout(x)))
+        output = self.lora_AB(self.lora_dropout(x))
         if requires_conversion:
             output = output.to(expected_dtype)
         output = output * self.scaling
@@ -433,23 +467,6 @@ class QLORA(nn.Module):
         result += output
 
         return result
-    
-
-def estimate_mfu(self, fwdbwd_per_iter, dt):
-    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
-    # first estimate the number of flops we do per iteration.
-    # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-    N = self.get_num_params()
-    cfg = self.config
-    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
-    flops_per_token = 6*N + 12*L*H*Q*T
-    flops_per_fwdbwd = flops_per_token * T
-    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-    # express our flops throughput as ratio of A100 bfloat16 peak flops
-    flops_achieved = flops_per_iter * (1.0/dt) # per second
-    flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
-    mfu = flops_achieved / flops_promised
-    return mfu
 
 
 # Main function, run on each process
@@ -630,6 +647,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         model,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
+        backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
         use_orig_params=False,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
@@ -652,13 +670,25 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             checkpoint_wrapper,
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
+                
         check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
         print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
         )
-
+        
+    if args["use_activation_cpu_offload"]:
+        model = offload_wrapper(model)                
+        # check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
+        # print("Applying activation checkpointing", rank)
+        # apply_activation_checkpointing(
+        #     model, checkpoint_wrapper_fn=offload_wrapper, check_fn=check_fn
+        # )       
+        
+        
     if rank == 0 and args['verbose']:
+        print("Config:")
+        print(cfg)
         print("Model:")
         print(model)
         print("Starting training")
@@ -694,6 +724,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
+    # Reset peak memory to track that
+    torch.cuda.reset_peak_memory_stats(local_rank)
     for epoch in range(args['num_epochs']):
         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
         model.train()
@@ -714,9 +746,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._record_memory_history()
 
-            # Reset peak memory to track that
-            torch.cuda.reset_peak_memory_stats(local_rank)
-
             # Log memory usage
             if batch_idx == 4 and epoch == 0:
                 logger.log({"memory_before_forward": torch.cuda.memory_allocated(local_rank)/1e9}, rank)
@@ -724,13 +753,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Forward pass
             with sync_context:
                 with autocast:
-                    output = model(
-                        batch['input_ids'].to(local_rank),
-                        labels=batch['labels'].to(local_rank),
-                        attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(local_rank),
-                    )
+                    with torch.backends.cuda.sdp_kernel(True, False, False):
+                        output = model(
+                            batch['input_ids'].to(local_rank),
+                            labels=batch['labels'].to(local_rank),
+                            attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(local_rank),
+                        )
                     loss = output.loss
-
+                
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
 
@@ -768,14 +798,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if batch_idx == 4 and epoch == 0:
                 logger.log({"memory_after_backward": torch.cuda.memory_allocated(local_rank)/1e9}, rank)
 
-            # Print + log peak memory usage for the whole first step of training
-            if batch_idx == 4 and epoch == 0:
-                peak_memory = torch.cuda.max_memory_allocated(local_rank)
-                if args["verbose"]:
-                    print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
-                    if args["log_to"] == 'wandb':
-                        logger.log({"memory_peak": peak_memory}, rank)
-
             # Delete the output so more memory frees up before the next forward pass
             output = None
             loss = None
@@ -798,6 +820,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         logger.log({"loss": log_loss, "lr": log_lr}, rank)
                 ddp_loss = torch.zeros(2).to(local_rank)
 
+        # Print + log peak memory usage for the whole first step of training
+        if epoch == 0:
+            peak_memory = torch.cuda.max_memory_allocated(local_rank)
+            if args["verbose"]:
+                print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
+                if args["log_to"] == 'wandb':
+                    logger.log({"memory_peak": peak_memory}, rank)
+                    
     # Synchronize at the end and record time
     dist.barrier()
     torch.cuda.synchronize()
@@ -844,6 +874,7 @@ def main(
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
     use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
+    use_activation_cpu_offload: bool_arg = False, # Whether to use activation cpu offload
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
     no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision

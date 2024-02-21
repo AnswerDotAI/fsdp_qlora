@@ -6,3 +6,4 @@ nbs/profile_snapshots
 **/*.log
 nbs/tmp-*
 data/
+sbatch_outputs/
