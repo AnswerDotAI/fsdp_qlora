@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --account=answerai
 #SBATCH --partition=a40x
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1          # crucial - only 1 task per dist per node!
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=4
 #SBATCH --mem=256gb
 #SBATCH --cpus-per-gpu=12
 #SBATCH --job-name=fsdp-multi-node-test
@@ -33,7 +33,7 @@ echo "Starting python script"
 module load cuda/11.8
 
 SHARED_VOLUME_DIR=/weka/home-$(whoami)
-source $SHARED_VOLUME_DIR/py_venvs/fsdp-qlora/bin/activate
+source $SHARED_VOLUME_DIR/py_venvs/fsdp-qlora-py311/bin/activate
 
 # nccl
 export FI_EFA_FORK_SAFE=1
@@ -61,7 +61,7 @@ echo "Using nccl from $(python -c 'import torch; print(torch.cuda.nccl.version()
 # print cuda home
 echo "CUDA_HOME=$CUDA_HOME"
 
-GLOBAL_BATCH_SIZE=64
+# GLOBAL_BATCH_SIZE=64
 MAX_BATCH_SIZE=8
 GRAD_ACCUM_STEPS=1
 

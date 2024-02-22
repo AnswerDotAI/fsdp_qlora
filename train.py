@@ -377,25 +377,25 @@ def get_optimizer(model:nn.Module, args:Dict):
 
 # Wrap the model (LoRA policy from llama-recipes):
 # This checks for lora layers (has weight and requires_grad)
-# def create_default_auto_wrap_policy():
-#     def lambda_policy_fn(module):
-#         return (
-#             len(list(module.named_children())) == 0
-#             and getattr(module, "weight", None) is not None
-#             and module.weight.requires_grad
-#         )
-#     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
-#     transformer_layer_name = LlamaDecoderLayer
-#     transformer_wrap_policy = functools.partial(
-#         transformer_auto_wrap_policy,
-#         transformer_layer_cls=(
-#             PrefixEncoder,
-#             PromptEncoder,
-#             PromptEmbedding,
-#             transformer_layer_name,
-#         ),
-#     )
-#     return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
+def create_default_auto_wrap_policy():
+    def lambda_policy_fn(module):
+        return (
+            len(list(module.named_children())) == 0
+            and getattr(module, "weight", None) is not None
+            and module.weight.requires_grad
+        )
+    lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
+    transformer_layer_name = LlamaDecoderLayer
+    transformer_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=(
+            PrefixEncoder,
+            PromptEncoder,
+            PromptEmbedding,
+            transformer_layer_name,
+        ),
+    )
+    return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
 
 def create_default_auto_wrap_policy():
     def lambda_policy_fn(module):
@@ -429,12 +429,12 @@ def create_default_auto_wrap_policy():
                                                    self_attn_policy, mlp_policy])
 
 
-# Custom QLORA module.
-class QLORA(nn.Module):
+# Custom LORA module.
+class LORA(nn.Module):
     def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout):
         super().__init__()
         self.base_layer = base_layer
-        dtype = base_layer.compute_dtype
+        dtype = getattr(base_layer, "compute_dtype", base_layer.weight.dtype)
         device = base_layer.weight.device
         lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
         lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
@@ -526,9 +526,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Create model
+    cfg = None
     attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     print("Creating model", rank)
-    if args["train_type"] == "full" or args["train_type"] == "lora":
+    if args["train_type"] in ["full", "lora", "custom_lora"]:
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
                 args["model_name"],
@@ -606,17 +607,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] == "custom_qlora":
-        # Create QLORA layers.
+    elif args["train_type"] in ["custom_qlora", "custom_lora"]:
+        # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = QLORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
+                qlora_layer = LORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_A', 'lora_B']]):
+            if any([lora_name in n for lora_name in ['lora_AB']]):
                 p.requires_grad = True
             else:
                 p.requires_grad = False
@@ -664,6 +665,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Synchronize at the start
     dist.barrier()
 
+    model = torch.compile(model)
+
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
         non_reentrant_wrapper = functools.partial(
@@ -678,6 +681,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         )
         
     if args["use_activation_cpu_offload"]:
+        print("Applying activation offloading", rank)
         model = offload_wrapper(model)                
         # check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
         # print("Applying activation checkpointing", rank)
@@ -865,7 +869,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
