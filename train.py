@@ -58,6 +58,9 @@ from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
+import hqq_aten
+from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
+
 # PEFT
 from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
@@ -135,6 +138,29 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:L
             )
     return model
 
+def replace_linear_hqq(model:nn.Module, quant_config, skip_modules:List[str]=["lm_head"], **kwargs):
+    """
+    Replace linear modules with a new Linear module.
+    Parameters:
+        model (`torch.nn.Module`):
+            Input model or `torch.nn.Module` as the function is run recursively.
+        quant_config (`Dict[str, Any]`):
+            The quantization configuration for the new linear module.
+        skip_modules (`List[str]`, *optional*, defaults to `lm_head`):
+            List of modules names not to convert. Defaults to `lm_head`.
+    """
+    for name, module in model.named_children():
+        if len(list(module.children())) > 0:
+            replace_linear_hqq(module, quant_config, skip_modules, **kwargs)
+
+        if isinstance(module, torch.nn.Linear) and name not in skip_modules:
+            model._modules[name] = HQQLinear(
+                module,
+                quant_config,
+                **kwargs
+            )
+    return model
+
 def setup_quantized_meta_for_peft(model:nn.Module):
     """Replaces `quant_state.to` with a dummy function to prevent PEFT from moving `quant_state` to meta device"""
     def temp_to_method(self, *args, **kwargs):
@@ -191,6 +217,62 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
             elif low_memory:
                 value = type(param)(value.data.to("cpu"), **value.__dict__)
         else:
+            value = type(param)(place_on_device(value).data)
+
+    except AttributeError:
+        # it's a buffer
+        value = place_on_device(value)
+        pass
+    setattr(submodule, value_key, value)
+
+
+def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
+                                  skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False):
+    """
+    Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
+
+    Quantizes `Params4bit` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
+    """
+    def place_on_device(value):
+        if is_meta_rank:
+            device = 'meta'
+        elif low_memory:
+            device = 'cpu'
+        return value.to(device=device, dtype=dtype)
+
+    if any([skip_name in name for skip_name in skip_names]):
+        if verbose:
+            print(f"Skipping {name} because it is in skip_names")
+        return
+
+    module_key, _, value_key = name.rpartition('.')
+    try:
+        submodule = module.get_submodule(module_key)
+    except AttributeError as e:
+        print(f"Module {module_key} not found:\n{e}")
+        return
+
+    try:
+        if isinstance(submodule, HQQLinear):
+            if value_key == "weight":
+                # init meta weights as empty on cpu
+                submodule.linear_layer.to_empty(device="cpu")
+                # copy pretrained weights
+                submodule.linear_layer.weight.data.copy_(value.to(torch.float32))
+                # quantize and update metadata
+                submodule.initialize()
+                
+                if is_meta_rank:
+                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
+                elif low_memory:
+                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
+                submodule.in_gpu = False
+
+            if value_key == "bias":
+                raise ValueError("Bias not supported yet!")
+        
+        else:
+            param = submodule.get_parameter(value_key)
             value = type(param)(place_on_device(value).data)
 
     except AttributeError:
@@ -505,13 +587,13 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         torch_dtype, compute_dtype = torch.float32, torch.float16
     elif args["precision"] == "fp16_autocast":
         compute_dtype, torch_dtype = torch.float16, torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32, _module_classes_to_ignore=[])
     elif args["precision"] == "bf16_autocast":
         compute_dtype, torch_dtype = torch.bfloat16, torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32, _module_classes_to_ignore=[])
     elif args["precision"] == "bf16_buffers_autocast":
         compute_dtype, torch_dtype = torch.bfloat16, torch.bfloat16
-        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
+        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32, _module_classes_to_ignore=[HQQLinear])
         load_param_skip_names = ['inv_freq']
     else:
         raise ValueError("Invalid precision")
@@ -547,16 +629,25 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
+        # cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                         quant_type='nf4', quant_storage=torch_dtype)
+            if args["train_type"] == "hqq_lora":
+                # TODO: Tune BaseQuantizeConfig.
+                quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=False, 
+                                                quant_scale=False, offload_meta=False)
+                model.model = replace_linear_hqq(model.model, quant_config, device_n=torch.cuda.current_device(),
+                                                compute_dtype=compute_dtype, del_orig=True, initialize=False)     
+                HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)              
+            else:
+                model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
+                                            quant_type='nf4', quant_storage=torch_dtype)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
@@ -578,9 +669,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
-                load_and_quantize(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                                  is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+                if args["train_type"] == "hqq_lora":
+                    load_and_quantize_hqq(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
+                                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+                else:
+                    load_and_quantize(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
+                                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         if args["precision"] == "bf16":
+            if args['hqq_lora']: 
+                raise ValueError("Can't cast model dtype with HQQ LoRA since quantized weights are stored in float32 and handled with .view(), use mixed precision setup.")
             model.to(torch_dtype)
 
     print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
@@ -607,7 +704,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora"]:
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora"]:
         # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
@@ -665,7 +762,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Synchronize at the start
     dist.barrier()
 
-    model = torch.compile(model)
+    # model = torch.compile(model)
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
@@ -710,7 +807,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         print("Optimizer params:")
         for group in optimizer.param_groups:
             for param in group['params']:
-                print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}")
+                print(f"Shape: {param.shape}, Requires Grad: {param.requires_grad}, Dtype: {param.dtype}")
 
 
     # Autocast for mixed precision with fp16/bf16 compute types with fp32 params
@@ -757,11 +854,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Forward pass
             with sync_context:
                 with autocast:
-                    with torch.backends.cuda.sdp_kernel(True, False, False):
+                    with torch.backends.cuda.sdp_kernel(True, True, False):
                         output = model(
                             batch['input_ids'].to(local_rank),
                             labels=batch['labels'].to(local_rank),
-                            attention_mask=None if batch['attention_mask'] is None else batch['attention_mask'].to(local_rank),
+                            attention_mask=None,
                         )
                     loss = output.loss
                 
@@ -869,7 +966,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
