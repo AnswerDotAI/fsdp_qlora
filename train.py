@@ -252,6 +252,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
         print(f"Module {module_key} not found:\n{e}")
         return
 
+    start = time.time()
     try:
         if isinstance(submodule, HQQLinear):
             if value_key == "weight":
@@ -271,6 +272,11 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
             if value_key == "bias":
                 raise ValueError("Bias not supported yet!")
         
+            end = time.time()
+            if not is_meta_rank:
+                print(f"Loaded HQQLinear quantized {module_key} in {end-start:.3f} seconds")
+            return
+        
         else:
             param = submodule.get_parameter(value_key)
             value = type(param)(place_on_device(value).data)
@@ -280,7 +286,11 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
         value = place_on_device(value)
         pass
     setattr(submodule, value_key, value)
-
+    end = time.time()
+    torch.cuda.empty_cache()
+    if not is_meta_rank:
+        print(f"Loaded {module_key} and {value_key} in {end-start:.3f} seconds")
+    
 
 # DATASET + DATALOADERS (modified from llama recipes)
 # Formatting prompts in alpaca
@@ -516,8 +526,8 @@ class LORA(nn.Module):
     def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout):
         super().__init__()
         self.base_layer = base_layer
-        dtype = getattr(base_layer, "compute_dtype", base_layer.weight.dtype)
-        device = base_layer.weight.device
+        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
+        device = next(base_layer.parameters()).device
         lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
         lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
         self.lora_AB = nn.Sequential(lora_A, lora_B)
@@ -668,7 +678,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
+        # TODO: Run load_and_quantize in parallel with multiple processes.
         print("Loading model", rank)
+        start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             for name, param in weights.items():
@@ -678,11 +690,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 else:
                     load_and_quantize(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                                             is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+        if rank == 0: print(f"Loaded model weights in {time.time()-start:.3f} seconds")
+        
         if args["precision"] == "bf16":
-            if args['hqq_lora']: 
-                # TODO: don't cast HQQLinear.
-                raise ValueError("Can't cast model dtype with HQQ LoRA since quantized weights are stored in float32 and handled with .view(), use mixed precision setup.")
-            model.to(torch_dtype)
+            # if args['hqq_lora']: 
+            #     # TODO: don't cast HQQLinear.
+            #     raise ValueError("Can't cast model dtype with HQQ LoRA since quantized weights are stored in float32 and handled with .view(), use mixed precision setup.")
+            # model.to(torch_dtype)
+            pass
 
     print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
