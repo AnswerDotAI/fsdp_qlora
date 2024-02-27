@@ -479,7 +479,7 @@ def create_default_auto_wrap_policy():
     )
     return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
 
-def create_default_auto_wrap_policy():
+def create_custom_auto_wrap_policy():
     def lambda_policy_fn(module):
         # LORA trainable layers.
         return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
@@ -507,8 +507,8 @@ def create_default_auto_wrap_policy():
         ),
     )
     return functools.partial(_or_policy, policies=[lambda_policy, 
-                                                   transformer_wrap_policy, 
-                                                   self_attn_policy, mlp_policy])
+                                                transformer_wrap_policy, 
+                                                self_attn_policy, mlp_policy])
 
 
 # Custom LORA module.
@@ -633,15 +633,18 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        # cfg.num_hidden_layers = 2 # DEBUG
+        cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
             if args["train_type"] == "hqq_lora":
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=False, 
-                                                quant_scale=False, offload_meta=False)
+                quant_config = BaseQuantizeConfig(nbits=4, 
+                                                  group_size=64, 
+                                                  quant_zero=True, 
+                                                  quant_scale=True, 
+                                                  offload_meta=True)
                 model.model = replace_linear_hqq(model.model, quant_config, device_n=torch.cuda.current_device(),
                                                 compute_dtype=compute_dtype, del_orig=True, initialize=False)     
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)              
@@ -677,6 +680,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                                             is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
         if args["precision"] == "bf16":
             if args['hqq_lora']: 
+                # TODO: don't cast HQQLinear.
                 raise ValueError("Can't cast model dtype with HQQ LoRA since quantized weights are stored in float32 and handled with .view(), use mixed precision setup.")
             model.to(torch_dtype)
 
@@ -725,7 +729,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies LoRA policy
-    my_auto_wrap_policy = create_default_auto_wrap_policy()
+    if args["train_type"] in ["custom_qlora", "hqq_lora"]:
+        my_auto_wrap_policy = create_custom_auto_wrap_policy()
+    else:
+        my_auto_wrap_policy = create_default_auto_wrap_policy()
 
     print("Wrapping model w/ FSDP", rank)
     if args["sharding_strategy"] == "full_shard":

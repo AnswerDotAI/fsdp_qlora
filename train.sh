@@ -54,3 +54,22 @@ python train.py \
 # stop instance
 # requires: az login --use-device-code
 az vm deallocate -g resource-group-us-east -n a100-duo
+
+export CUDA_VISIBLE_DEVICES=3,4
+python train.py \
+--world_size 2 \
+--model_name meta-llama/Llama-2-7b-hf \
+--gradient_accumulation_steps 2 \
+--batch_size 4 \
+--context_length 512 \
+--num_epochs 1 \
+--sharding_strategy full_shard \
+--precision bf16 \
+--train_type full \
+--use_gradient_checkpointing true \
+--use_cpu_offload false \
+--log_to stdout \
+--dataset alpaca \
+--verbose true \
+--save_model false \
+--output_dir ~/models/hqq_lora_alpaca
