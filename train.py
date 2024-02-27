@@ -633,7 +633,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        cfg.num_hidden_layers = 2 # DEBUG
+        # cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -752,7 +752,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         model,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
-        backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
+        # backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
         use_orig_params=False,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
@@ -861,12 +861,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Forward pass
             with sync_context:
                 with autocast:
-                    with torch.backends.cuda.sdp_kernel(True, True, False):
-                        output = model(
-                            batch['input_ids'].to(local_rank),
-                            labels=batch['labels'].to(local_rank),
-                            attention_mask=None,
-                        )
+                    output = model(
+                        batch['input_ids'].to(local_rank),
+                        labels=batch['labels'].to(local_rank),
+                        attention_mask=None,
+                    )
                     loss = output.loss
                 
                 # Scale loss for gradient accumulation
