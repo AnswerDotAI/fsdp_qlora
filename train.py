@@ -60,6 +60,7 @@ from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 import hqq_aten
 from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
+from fastcore.parallel import parallel
 
 # PEFT
 from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
@@ -249,7 +250,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
     try:
         submodule = module.get_submodule(module_key)
     except AttributeError as e:
-        print(f"Module {module_key} not found:\n{e}")
+        print(f"Module {module_key} not found in the current model:\n{e}")
         return
 
     start = time.time()
@@ -259,7 +260,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
                 # init meta weights as empty on cpu
                 submodule.linear_layer.to_empty(device="cpu")
                 # copy pretrained weights
-                submodule.linear_layer.weight.data.copy_(value.to(torch.float32))
+                submodule.linear_layer.weight.data.copy_(value)
                 # quantize and update metadata
                 submodule.initialize()
                 
@@ -270,7 +271,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
                 submodule.in_gpu = False
 
             if value_key == "bias":
-                raise ValueError("Bias not supported yet!")
+                raise ValueError("Bias not supported in HQQLinear yet!")
         
             end = time.time()
             if not is_meta_rank:
@@ -285,6 +286,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
         # it's a buffer
         value = place_on_device(value)
         pass
+    
     setattr(submodule, value_key, value)
     end = time.time()
     torch.cuda.empty_cache()
@@ -679,17 +681,19 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
         # TODO: Run load_and_quantize in parallel with multiple processes.
+        def load_and_quantize_parallel(name_param, load_func, model, **kwargs):
+            name, param = name_param
+            load_func(model, name, param, **kwargs)
+            
         print("Loading model", rank)
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
-            for name, param in weights.items():
-                if args["train_type"] == "hqq_lora":
-                    load_and_quantize_hqq(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
-                else:
-                    load_and_quantize(model, name, param, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                                            is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"])
+            load_func = load_and_quantize_hqq if args["train_type"] == "hqq_lora" else load_and_quantize
+            parallel(load_and_quantize_parallel, weights.items(), n_workers=8, threadpool=True, 
+                     load_func=load_func, model=model, dtype=torch_dtype, device=local_rank,
+                     skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0), 
+                     verbose=args["verbose"])
         if rank == 0: print(f"Loaded model weights in {time.time()-start:.3f} seconds")
         
         if args["precision"] == "bf16":
