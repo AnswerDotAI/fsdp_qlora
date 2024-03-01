@@ -532,6 +532,8 @@ class LORA(nn.Module):
         device = next(base_layer.parameters()).device
         lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
         lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
+        lora_B.weight.data.zero_()
+        
         self.lora_AB = nn.Sequential(lora_A, lora_B)
         
         self.lora_alpha = lora_alpha
@@ -561,6 +563,32 @@ class LORA(nn.Module):
         result += output
 
         return result
+
+
+# TODO: Do we need a custom backward?
+# FIXME: Not working now.
+class HQQDORA(nn.Module):
+    def __init__(self, base_layer, lora_rank, *args, **kwargs):
+        super().__init__()
+        self.base_layer = base_layer
+        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
+        device = next(base_layer.parameters()).device
+        
+        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
+        self.lora_A = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device,dtype=dtype)*std_dev)
+        self.lora_B = nn.Parameter(torch.zeros(lora_rank, base_layer.in_features).to(device=device,dtype=dtype))
+        
+        if not self.base_layer.W_q.is_meta:
+            self.dora_scale = nn.Parameter(self.base_layer.cuda().dequantize_aten().data.clone().norm(p=2, dim=0, keepdim=True)).to(device=device,dtype=dtype)
+        else:
+            self.dora_scale = nn.Parameter(torch.randn((base_layer.in_features,base_layer.out_features), device=device, dtype=dtype))
+    
+    def forward(self, x):        
+        lora = torch.matmul(self.lora_A, self.lora_B)
+        adapted = self.base_layer.dequantize_aten() + lora
+        column_norm = adapted.norm(p=2, dim=0, keepdim=True)
+        calc_weights = self.m * (adapted / column_norm)
+        return torch.matmul(x, calc_weights.t())
 
 
 # Main function, run on each process
@@ -641,22 +669,23 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        # cfg.num_hidden_layers = 2 # DEBUG
+        cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] == "hqq_lora":
+            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, 
                                                   group_size=64, 
                                                   quant_zero=True, 
                                                   quant_scale=True, 
-                                                  offload_meta=True)
+                                                  offload_meta=True, 
+                                                  view_as_float=True)
                 model.model = replace_linear_hqq(model.model, quant_config, device_n=torch.cuda.current_device(),
                                                 compute_dtype=compute_dtype, del_orig=True, initialize=False)     
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)              
@@ -689,7 +718,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
-            load_func = load_and_quantize_hqq if args["train_type"] == "hqq_lora" else load_and_quantize
+            load_func = load_and_quantize_hqq if args["train_type"] in ["hqq_lora", "hqq_dora"] else load_and_quantize
             parallel(load_and_quantize_parallel, weights.items(), n_workers=8, threadpool=True, 
                      load_func=load_func, model=model, dtype=torch_dtype, device=local_rank,
                      skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0), 
@@ -727,18 +756,25 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora"]:
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
+        if args["train_type"] == ["hqq_dora"]:
+            print("Using HQQDORA", rank)
+            lora_cls = HQQDORA  
+        else: 
+            print("Using LORA", rank)
+            lora_cls = LORA
         # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = LORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
+                qlora_layer = lora_cls(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_A', 'dora_scale']]):
                 p.requires_grad = True
+                print("Trainable LORA layer", n)
             else:
                 p.requires_grad = False
 
@@ -748,7 +784,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies LoRA policy
-    if args["train_type"] in ["custom_qlora", "hqq_lora"]:
+    if args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora"]:
         my_auto_wrap_policy = create_custom_auto_wrap_policy()
     else:
         my_auto_wrap_policy = create_default_auto_wrap_policy()
@@ -846,6 +882,18 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Train loop
+    # Sanity check: Compare initial model weights and weights after training.
+    # # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
+    # if args["save_model"]:
+    #     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    #     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+    #         cpu_state_dict = model.state_dict()
+    #         os.makedirs(args["output_dir"]+"_init", exist_ok=True)
+    #         if rank==0:
+    #             print_func("Saving model")
+    #             save_file(cpu_state_dict, os.path.join(args["output_dir"]+"_init", "model_state_dict.safetensors"))
+    #             print_func("Done", rank)
+                
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
@@ -971,15 +1019,34 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     logger.finish(rank=rank)
 
     # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
+    # HQQLinear custom state_dict() method causes issues when saving.
+    # Model is saved fine when `state_dict()` method is removed.
+    # Non param/buffer types are not saved with FSDP.
+    # It might be better to just save the trained lora layers.
+    # summon_full_params on lora layers and save.
     if args["save_model"]:
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-            cpu_state_dict = model.state_dict()
-            os.makedirs(args["output_dir"], exist_ok=True)
+        if args["train_type"] in ["custom_qlora", "hqq_lora"]:
+            cpu_state_dict = {}
+            trainable_modules = [(n,m) for n,m in model.named_modules() if n.endswith('lora_AB')]
+            for prefix,module in trainable_modules:
+                prefix = (prefix.replace("_fsdp_wrapped_module.", "")
+                                 .replace("_checkpoint_wrapped_module.", "")
+                                 .replace("_offload_wrapped_module.", ""))
+                with FSDP.summon_full_params(module, rank0_only=True, offload_to_cpu=True):
+                    cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
             if rank==0:
                 print_func("Saving model")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
                 print_func("Done", rank)
+        else:
+            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+                cpu_state_dict = model.state_dict()
+                os.makedirs(args["output_dir"], exist_ok=True)
+                if rank==0:
+                    print_func("Saving model")
+                    save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
+                    print_func("Done", rank)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
@@ -991,7 +1058,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)

@@ -53,3 +53,60 @@ python train.py \
 --log_to wandb \
 --dataset alpaca \
 --verbose true
+
+# DORA: max batch size / gpu = 32 (28/40 GB)
+# 32 * 2 gpus = 64
+export CUDA_VISIBLE_DEVICES=6,7
+python train.py \
+--world_size 2 \
+--master_port 12357 \
+--model_name meta-llama/Llama-2-7b-hf \
+--gradient_accumulation_steps 1 \
+--batch_size 32 \
+--context_length 512 \
+--precision bf16 \
+--train_type hqq_dora \
+--use_gradient_checkpointing true \
+--use_cpu_offload false \
+--log_to stdout \
+--dataset alpaca \
+--verbose true
+
+
+# 32 * 2 gpus = 64
+export CUDA_VISIBLE_DEVICES=2,6
+python train.py \
+--world_size 2 \
+--master_port 12356 \
+--model_name meta-llama/Llama-2-7b-hf \
+--gradient_accumulation_steps 1 \
+--batch_size 32 \
+--context_length 512 \
+--precision bf16 \
+--train_type hqq_lora \
+--use_gradient_checkpointing true \
+--use_cpu_offload false \
+--log_to stdout \
+--dataset dummy \
+--verbose true \
+--save_model true \
+--output_dir /weka/home-keremturgutlu/models/hqq_lora_dummy
+
+export CUDA_VISIBLE_DEVICES=2,6
+python train.py \
+--lr 1e-3 \
+--world_size 2 \
+--master_port 12356 \
+--model_name meta-llama/Llama-2-7b-hf \
+--gradient_accumulation_steps 1 \
+--batch_size 32 \
+--context_length 512 \
+--precision bf16 \
+--train_type custom_qlora \
+--use_gradient_checkpointing true \
+--use_cpu_offload false \
+--log_to stdout \
+--dataset dummy \
+--verbose true \
+--save_model true \
+--output_dir /weka/home-keremturgutlu/models/qlora_dummy

@@ -90,7 +90,7 @@ python train.py \
 --dataset dummy \
 --verbose true
 
-export CUDA_VISIBLE_DEVICES=3,4,5
+export CUDA_VISIBLE_DEVICES=3,4
 python train.py \
 --world_size 3 \
 --model_name meta-llama/Llama-2-70b-hf \
@@ -100,9 +100,9 @@ python train.py \
 --num_epochs 1 \
 --sharding_strategy full_shard \
 --precision bf16 \
---train_type hqq_lora \
+--train_type hqq_dora \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \
 --log_to wandb \
 --dataset dummy \
---verbose true                                    
+--verbose true      
