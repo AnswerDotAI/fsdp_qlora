@@ -203,7 +203,7 @@ python train.py \
 --verbose true
 ```
 
-**Note:** For large batch size or long context training HQQ LoRA is more memory efficient compared to BnB LoRA. So if you are running into OOM issues, try using HQQ LoRA.
+**Note:** For large batch size or long context training HQQ LoRA is more memory efficient compared to BnB LoRA. So if you are running into OOM issues, try using HQQ LoRA. For example, HQQ Llama 7b with context length of 512 with bs=32 on 2 40GB A100s and BnB bs=16 requires similar memory.
 
 
 ## SLURM Training
