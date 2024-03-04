@@ -232,7 +232,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
-    Quantizes `Params4bit` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
+    Quantizes `HQQLinear` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
     """
     def place_on_device(value):
         if is_meta_rank:
@@ -627,13 +627,13 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         torch_dtype, compute_dtype = torch.float32, torch.float16
     elif args["precision"] == "fp16_autocast":
         compute_dtype, torch_dtype = torch.float16, torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32, _module_classes_to_ignore=[])
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_autocast":
         compute_dtype, torch_dtype = torch.bfloat16, torch.float32
-        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32, _module_classes_to_ignore=[])
+        mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
     elif args["precision"] == "bf16_buffers_autocast":
         compute_dtype, torch_dtype = torch.bfloat16, torch.bfloat16
-        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32, _module_classes_to_ignore=[HQQLinear])
+        mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
         load_param_skip_names = ['inv_freq']
     else:
         raise ValueError("Invalid precision")
@@ -673,7 +673,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        cfg.num_hidden_layers = 2 # DEBUG
+        # cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -709,7 +709,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
-        # TODO: Run load_and_quantize in parallel with multiple processes.
         def load_and_quantize_parallel(name_param, load_func, model, **kwargs):
             name, param = name_param
             load_func(model, name, param, **kwargs)
@@ -719,7 +718,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             load_func = load_and_quantize_hqq if args["train_type"] in ["hqq_lora", "hqq_dora"] else load_and_quantize
-            parallel(load_and_quantize_parallel, weights.items(), n_workers=8, threadpool=True, 
+            devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
+            n_workers = min(os.cpu_count(), int(devprops.total_memory*0.25/1e6//600))
+            if args['train_type'] == 'hqq_lora':
+                n_workers = 2 # requires hand tuning, around 35GB peak memory on the main GPU for 70B model, high torch allocation.
+            parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True, 
                      load_func=load_func, model=model, dtype=torch_dtype, device=local_rank,
                      skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0), 
                      verbose=args["verbose"])
@@ -757,7 +760,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
     elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
-        if args["train_type"] == ["hqq_dora"]:
+        if args["train_type"] == "hqq_dora":
             print("Using HQQDORA", rank)
             lora_cls = HQQDORA  
         else: 
