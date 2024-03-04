@@ -566,7 +566,7 @@ class LORA(nn.Module):
 
 
 # TODO: Do we need a custom backward?
-# FIXME: Not working now.
+# FIXME: Not working now. Need to figure out how to init self.dora_scale
 class HQQDORA(nn.Module):
     def __init__(self, base_layer, lora_rank, *args, **kwargs):
         super().__init__()
@@ -587,7 +587,7 @@ class HQQDORA(nn.Module):
         lora = torch.matmul(self.lora_A, self.lora_B)
         adapted = self.base_layer.dequantize_aten() + lora
         column_norm = adapted.norm(p=2, dim=0, keepdim=True)
-        calc_weights = self.m * (adapted / column_norm)
+        calc_weights = self.dora_scale * (adapted / column_norm)
         return torch.matmul(x, calc_weights.t())
 
 
