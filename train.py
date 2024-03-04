@@ -775,7 +775,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_A', 'dora_scale']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'dora_scale']]):
                 p.requires_grad = True
                 print("Trainable LORA layer", n)
             else:
@@ -845,12 +845,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if args["use_activation_cpu_offload"]:
         print("Applying activation offloading", rank)
         model = offload_wrapper(model)                
-        # check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
-        # print("Applying activation checkpointing", rank)
-        # apply_activation_checkpointing(
-        #     model, checkpoint_wrapper_fn=offload_wrapper, check_fn=check_fn
-        # )       
-        
         
     if rank == 0 and args['verbose']:
         print("Config:")
@@ -884,19 +878,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     scale_grads = scaler is not None
 
 
-    # Train loop
-    # Sanity check: Compare initial model weights and weights after training.
-    # # Save model - ref: https://github.com/pytorch/pytorch/issues/98823
-    # if args["save_model"]:
-    #     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    #     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-    #         cpu_state_dict = model.state_dict()
-    #         os.makedirs(args["output_dir"]+"_init", exist_ok=True)
-    #         if rank==0:
-    #             print_func("Saving model")
-    #             save_file(cpu_state_dict, os.path.join(args["output_dir"]+"_init", "model_state_dict.safetensors"))
-    #             print_func("Done", rank)
-                
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
