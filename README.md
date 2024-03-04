@@ -17,7 +17,6 @@ The following steps should work (tested on cuda 11.7, 11.8 and 12.1):
 Check out different combos of settings. For example,
 `python train.py --train_type lora` to do lora instead of the default qlora
 
-
 ## Mixed Precision Training
 
 ### `--precision bf16` (pure bfloat16)
@@ -61,7 +60,6 @@ mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat
 
 As a results, sharded and unsharded params will be stored in bf16. It will use `autocast(torch.bfloat16)` for forward and backward passes, and `autocast(torch.bfloat16)` for gradient reduction and updates. Buffers and only [eligible operations](https://pytorch.org/docs/stable/amp.html#cuda-ops-that-can-autocast-to-float16) in autocast will be performed in bf16.
 
-
 ## Comparinson to an existing trainer
 ![Screenshot 2024-02-01 083222](https://github.com/AnswerDotAI/fsdp_qlora/assets/6575163/97bb03fb-c2bb-4679-83ff-63a2e202826f)
 `hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version. 
@@ -69,3 +67,15 @@ As a results, sharded and unsharded params will be stored in bf16. It will use `
 ## Converting Saved Models
 
 If you specify `--save_model True` the adapter layers will be saved as a state dict. To convert to the regular huggingface format and upload to the hub, see: **Converting the State Dict.ipynb**
+
+## Limitations
+
+While QLoRA finetuning works with FSDP, there are some rough edges to be aware of with this alpha release and our example script.
+
+First, the current release of Transformer `AutoModel.from_pretrained` cannot be used to load models into quantized weights, as it does not support the new quant_storage or quantization flag. Loading pretrained models requires writing or using custom model loading code. We provide an example of how to load and quantize a QLoRA model for finetuning in our demo script.
+We are actively working with Hugging Face to resolve this incompatibility in future Transformers and PEFT releases.
+
+Second, quantized models must be entirely loaded into all GPUs before FSDP can shard them across GPUs. We mitigate this issue in our example script by loading the model weights layer by layer and quantizing them before loading the next layer. This means the maximum model size which QLoRA and FSDP can finetune on a 24GB cards is currently 34 billion parameters.
+Third, QLoRA doesn’t support FSDP’s and llama-recipes’ low cpu memory usage option via `sync_module_states`. This option allows FSDP to only load one instance of the model, potentially split evenly across GPUs, and then shard the model weights across GPUs for training. We are actively researching fixes for this issue and hope to resolve it in a future update.
+
+Fourth, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
