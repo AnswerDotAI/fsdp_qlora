@@ -565,31 +565,6 @@ class LORA(nn.Module):
         return result
 
 
-# TODO: Do we need a custom backward?
-# FIXME: Not working now. Need to figure out how to init self.dora_scale
-class HQQDORA(nn.Module):
-    def __init__(self, base_layer, lora_rank, *args, **kwargs):
-        super().__init__()
-        self.base_layer = base_layer
-        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
-        device = next(base_layer.parameters()).device
-
-        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
-        self.lora_A = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device,dtype=dtype)*std_dev)
-        self.lora_B = nn.Parameter(torch.zeros(lora_rank, base_layer.in_features).to(device=device,dtype=dtype))
-
-        if not self.base_layer.W_q.is_meta:
-            self.dora_scale = nn.Parameter(self.base_layer.cuda().dequantize_aten().data.clone().norm(p=2, dim=0, keepdim=True)).to(device=device,dtype=dtype)
-        else:
-            self.dora_scale = nn.Parameter(torch.randn((base_layer.in_features,base_layer.out_features), device=device, dtype=dtype))
-
-    def forward(self, x):
-        lora = torch.matmul(self.lora_A, self.lora_B)
-        adapted = self.base_layer.dequantize_aten() + lora
-        column_norm = adapted.norm(p=2, dim=0, keepdim=True)
-        calc_weights = self.dora_scale * (adapted / column_norm)
-        return torch.matmul(x, calc_weights.t())
-
 
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
@@ -669,7 +644,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
@@ -677,7 +652,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
+            if args["train_type"] in ["hqq_lora"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4,
                                                   group_size=64,
@@ -716,7 +691,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
-            load_func = load_and_quantize_hqq if args["train_type"] in ["hqq_lora", "hqq_dora"] else load_and_quantize
+            load_func = load_and_quantize_hqq if args["train_type"] in ["hqq_lora"] else load_and_quantize
             devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
             n_workers = min(os.cpu_count(), int(devprops.total_memory*0.25/1e6//600))
             if args['train_type'] == 'hqq_lora':
@@ -752,23 +727,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
-        if args["train_type"] == "hqq_dora":
-            print("Using HQQDORA", rank)
-            lora_cls = HQQDORA
-        else:
-            print("Using LORA", rank)
-            lora_cls = LORA
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora"]:
         # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = lora_cls(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
+                qlora_layer = LORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'dora_scale']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B']]):
                 p.requires_grad = True
                 print("Trainable LORA layer", n)
             else:
@@ -780,7 +749,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies LoRA policy
-    if args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora"]:
+    if args["train_type"] in ["custom_qlora", "hqq_lora"]:
         my_auto_wrap_policy = create_custom_auto_wrap_policy()
     else:
         my_auto_wrap_policy = create_default_auto_wrap_policy()
@@ -1035,7 +1004,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU for training
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
