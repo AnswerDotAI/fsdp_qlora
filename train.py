@@ -408,33 +408,20 @@ def get_optimizer(model:nn.Module, args:Dict):
         raise ValueError("Invalid optimizer")
 
 
-# Wrap the model (LoRA policy from llama-recipes):
+# Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
-def create_default_auto_wrap_policy():
-    def lambda_policy_fn(module):
-        return (
-            len(list(module.named_children())) == 0
-            and getattr(module, "weight", None) is not None
-            and module.weight.requires_grad
-        )
-    lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
-    transformer_layer_name = LlamaDecoderLayer
-    transformer_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls=(
-            PrefixEncoder,
-            PromptEncoder,
-            PromptEmbedding,
-            transformer_layer_name,
-        ),
-    )
-    return functools.partial(_or_policy, policies=[lambda_policy, transformer_wrap_policy])
-
-def create_custom_auto_wrap_policy():
-    def lambda_policy_fn(module):
-        # LORA trainable layers.
-        return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
-
+def get_wrapping_policy(custom_policy:bool=False):
+    if custom_policy:
+        def lambda_policy_fn(module):
+            # LORA trainable layers.
+            return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
+    else:
+        def lambda_policy_fn(module):
+            return (
+                len(list(module.named_children())) == 0
+                and getattr(module, "weight", None) is not None
+                and module.weight.requires_grad
+            )
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
         return isinstance(module, tuple(LLAMA_ATTENTION_CLASSES.values()))
@@ -442,7 +429,6 @@ def create_custom_auto_wrap_policy():
     def mlp_policy_fn(module):
         # Check module name is self_attn.
         return isinstance(module, LlamaMLP)
-
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
@@ -457,9 +443,10 @@ def create_custom_auto_wrap_policy():
             transformer_layer_name,
         ),
     )
-    return functools.partial(_or_policy, policies=[lambda_policy,
-                                                transformer_wrap_policy,
-                                                self_attn_policy, mlp_policy])
+    policies=[lambda_policy, transformer_wrap_policy]
+    if custom_policy:
+        policies.extend([self_attn_policy, mlp_policy])
+    return functools.partial(_or_policy, policies=policies)
 
 
 # Custom LORA module.
@@ -682,11 +669,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(local_rank)}, rank)
 
 
-    # Wrap model with llama-recipies LoRA policy
-    if args["train_type"] in ["custom_qlora", "hqq_lora"]:
-        my_auto_wrap_policy = create_custom_auto_wrap_policy()
-    else:
-        my_auto_wrap_policy = create_default_auto_wrap_policy()
+    # Wrap model with llama-recipies or custom LoRA policy
+    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora"])
 
     print("Wrapping model w/ FSDP", rank)
     if args["sharding_strategy"] == "full_shard":
