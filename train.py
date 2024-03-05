@@ -114,7 +114,8 @@ def update_progress_bar(progress_bar:tqdm, epoch:int, log_loss:float, log_lr:flo
 
 
 # Utilities related to model loading
-def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:List[str]=["lm_head"], **kwargs):
+def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:dict|None=None,
+                   skip_modules:List[str]=["lm_head"], **kwargs):
     """
     Replace linear modules with a new Linear module.
     Parameters:
@@ -128,39 +129,22 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, skip_modules:L
     """
     for name, module in model.named_children():
         if len(list(module.children())) > 0:
-            replace_linear(module, linear_replacement, skip_modules, **kwargs)
+            replace_linear(module, linear_replacement, quant_config, skip_modules, **kwargs)
 
         if isinstance(module, torch.nn.Linear) and name not in skip_modules:
-            model._modules[name] = linear_replacement(
-                module.in_features,
-                module.out_features,
-                module.bias is not None,
-                **kwargs
-            )
+            if issubclass(linear_replacement, Linear4bit):
+                model._modules[name] = linear_replacement(
+                    module.in_features,
+                    module.out_features,
+                    module.bias is not None,
+                    **kwargs
+                )
+            elif issubclass(linear_replacement, HQQLinear):
+                model._modules[name] = linear_replacement(module, quant_config, **kwargs)
+            else:
+                raise ValueError(f"Unsupported linear replacement: {type(linear_replacement)}")
     return model
 
-def replace_linear_hqq(model:nn.Module, quant_config, skip_modules:List[str]=["lm_head"], **kwargs):
-    """
-    Replace linear modules with a new Linear module.
-    Parameters:
-        model (`torch.nn.Module`):
-            Input model or `torch.nn.Module` as the function is run recursively.
-        quant_config (`Dict[str, Any]`):
-            The quantization configuration for the new linear module.
-        skip_modules (`List[str]`, *optional*, defaults to `lm_head`):
-            List of modules names not to convert. Defaults to `lm_head`.
-    """
-    for name, module in model.named_children():
-        if len(list(module.children())) > 0:
-            replace_linear_hqq(module, quant_config, skip_modules, **kwargs)
-
-        if isinstance(module, torch.nn.Linear) and name not in skip_modules:
-            model._modules[name] = HQQLinear(
-                module,
-                quant_config,
-                **kwargs
-            )
-    return model
 
 def setup_quantized_meta_for_peft(model:nn.Module):
     """Replaces `quant_state.to` with a dummy function to prevent PEFT from moving `quant_state` to meta device"""
@@ -654,18 +638,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             model = AutoModelForCausalLM.from_config(cfg)
             if args["train_type"] in ["hqq_lora"]:
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=4,
-                                                  group_size=64,
-                                                  quant_zero=True,
-                                                  quant_scale=True,
-                                                  offload_meta=True,
-                                                  view_as_float=True)
-                model.model = replace_linear_hqq(model.model, quant_config, device_n=torch.cuda.current_device(),
-                                                compute_dtype=compute_dtype, del_orig=True, initialize=False)
+                quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
+                                                  quant_scale=True, offload_meta=True, view_as_float=True)
+                model.model = replace_linear(model.model, HQQLinear, quant_config, device_n=rank,
+                                             compute_dtype=compute_dtype, del_orig=True, initialize=False)
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
             else:
                 model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                            quant_type='nf4', quant_storage=torch_dtype)
+                                             quant_type='nf4', quant_storage=torch_dtype)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
