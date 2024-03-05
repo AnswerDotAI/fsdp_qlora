@@ -163,7 +163,7 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False):
+                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False, quant_nethod:str='bnb'):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -189,93 +189,48 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
         return
 
     try:
-        param = submodule.get_parameter(value_key)
-        if isinstance(param, Params4bit):
-            # With `sync_module_states=True`, a meta device Params4bit needs to be the same
-            # shape as the quantized Params4bit with an initialized quant_state. However,
-            # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
-            # workaround quantizes Params4bit to initialize quant_state on all ranks, then
-            # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
-            value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
-            if is_meta_rank:
-                value = type(param)(value.data.to("meta"), **value.__dict__)
-            elif low_memory:
-                value = type(param)(value.data.to("cpu"), **value.__dict__)
-        else:
-            value = type(param)(place_on_device(value).data)
-
-    except AttributeError:
-        # it's a buffer
-        value = place_on_device(value)
-        pass
-    setattr(submodule, value_key, value)
-
-
-def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                                  skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False):
-    """
-    Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
-
-    Quantizes `HQQLinear` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
-    """
-    def place_on_device(value):
-        if is_meta_rank:
-            device = 'meta'
-        elif low_memory:
-            device = 'cpu'
-        return value.to(device=device, dtype=dtype)
-
-    if any([skip_name in name for skip_name in skip_names]):
-        if verbose:
-            print(f"Skipping {name} because it is in skip_names")
-        return
-
-    module_key, _, value_key = name.rpartition('.')
-    try:
-        submodule = module.get_submodule(module_key)
-    except AttributeError as e:
-        print(f"Module {module_key} not found in the current model:\n{e}")
-        return
-
-    start = time.time()
-    try:
-        if isinstance(submodule, HQQLinear):
-            if value_key == "weight":
-                # init meta weights as empty on cpu
-                submodule.linear_layer.to_empty(device="cpu")
-                # copy pretrained weights
-                submodule.linear_layer.weight.data.copy_(value)
-                # quantize and update metadata
-                submodule.initialize()
-
-                if is_meta_rank:
-                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
-                elif low_memory:
-                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
-                submodule.in_gpu = False
-
-            if value_key == "bias":
-                raise ValueError("Bias not supported in HQQLinear yet!")
-
-            end = time.time()
-            if not is_meta_rank:
-                print(f"Loaded HQQLinear quantized {module_key} in {end-start:.3f} seconds")
-            return
-
-        else:
+        if quant_nethod=='bnb':
             param = submodule.get_parameter(value_key)
-            value = type(param)(place_on_device(value).data)
+            if isinstance(param, Params4bit):
+                # With `sync_module_states=True`, a meta device Params4bit needs to be the same
+                # shape as the quantized Params4bit with an initialized quant_state. However,
+                # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
+                # workaround quantizes Params4bit to initialize quant_state on all ranks, then
+                # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+                value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
+                if is_meta_rank:
+                    value = type(param)(value.data.to("meta"), **value.__dict__)
+                elif low_memory:
+                    value = type(param)(value.data.to("cpu"), **value.__dict__)
+            else:
+                value = type(param)(place_on_device(value).data)
+        elif quant_nethod=='hqq':
+            if isinstance(submodule, HQQLinear):
+                if value_key == "weight":
+                    # Like `Params4bit`, this workaround quantizes `HQQLinear`` per device so the quantization
+                    # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
+                    submodule.linear_layer.to_empty(device=device)
+                    submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
+                    submodule.initialize()
+
+                    if is_meta_rank:
+                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
+                    elif low_memory:
+                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
+                    submodule.in_gpu = False
+
+                if value_key == "bias":
+                    raise ValueError("Bias not supported in HQQLinear yet!")
+            else:
+                param = submodule.get_parameter(value_key)
+                value = type(param)(place_on_device(value).data)
 
     except AttributeError:
         # it's a buffer
         value = place_on_device(value)
         pass
-
-    setattr(submodule, value_key, value)
-    end = time.time()
-    torch.cuda.empty_cache()
-    if not is_meta_rank:
-        print(f"Loaded {module_key} and {value_key} in {end-start:.3f} seconds")
+    if not isinstance(submodule, HQQLinear):
+        setattr(submodule, value_key, value)
 
 
 # DATASET + DATALOADERS (modified from llama recipes)
@@ -663,23 +618,22 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
-        def load_and_quantize_parallel(name_param, load_func, model, **kwargs):
+        def load_and_quantize_parallel(name_param, model, **kwargs):
             name, param = name_param
-            load_func(model, name, param, **kwargs)
+            load_and_quantize(model, name, param, **kwargs)
 
         print("Loading model", rank)
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
-            load_func = load_and_quantize_hqq if args["train_type"] in ["hqq_lora"] else load_and_quantize
+            quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
             devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
             n_workers = min(os.cpu_count(), int(devprops.total_memory*0.25/1e6//600))
             if args['train_type'] == 'hqq_lora':
                 n_workers = 2 # requires hand tuning, around 35GB peak memory on the main GPU for 70B model, high torch allocation.
             parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True,
-                     load_func=load_func, model=model, dtype=torch_dtype, device=local_rank,
-                     skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0),
-                     verbose=args["verbose"])
+                     model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
+                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_nethod=quant_method)
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
