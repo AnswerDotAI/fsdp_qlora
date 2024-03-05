@@ -263,7 +263,7 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
                 submodule.linear_layer.weight.data.copy_(value)
                 # quantize and update metadata
                 submodule.initialize()
-                
+
                 if is_meta_rank:
                     setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
                 elif low_memory:
@@ -272,12 +272,12 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
 
             if value_key == "bias":
                 raise ValueError("Bias not supported in HQQLinear yet!")
-        
+
             end = time.time()
             if not is_meta_rank:
                 print(f"Loaded HQQLinear quantized {module_key} in {end-start:.3f} seconds")
             return
-        
+
         else:
             param = submodule.get_parameter(value_key)
             value = type(param)(place_on_device(value).data)
@@ -286,13 +286,13 @@ def load_and_quantize_hqq(module:nn.Module, name:str, value:Tensor, device:torch
         # it's a buffer
         value = place_on_device(value)
         pass
-    
+
     setattr(submodule, value_key, value)
     end = time.time()
     torch.cuda.empty_cache()
     if not is_meta_rank:
         print(f"Loaded {module_key} and {value_key} in {end-start:.3f} seconds")
-    
+
 
 # DATASET + DATALOADERS (modified from llama recipes)
 # Formatting prompts in alpaca
@@ -495,16 +495,16 @@ def create_custom_auto_wrap_policy():
     def lambda_policy_fn(module):
         # LORA trainable layers.
         return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
-    
+
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
         return isinstance(module, tuple(LLAMA_ATTENTION_CLASSES.values()))
-    
+
     def mlp_policy_fn(module):
         # Check module name is self_attn.
         return isinstance(module, LlamaMLP)
-        
-    
+
+
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
     mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
@@ -518,8 +518,8 @@ def create_custom_auto_wrap_policy():
             transformer_layer_name,
         ),
     )
-    return functools.partial(_or_policy, policies=[lambda_policy, 
-                                                transformer_wrap_policy, 
+    return functools.partial(_or_policy, policies=[lambda_policy,
+                                                transformer_wrap_policy,
                                                 self_attn_policy, mlp_policy])
 
 
@@ -533,9 +533,9 @@ class LORA(nn.Module):
         lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
         lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
         lora_B.weight.data.zero_()
-        
+
         self.lora_AB = nn.Sequential(lora_A, lora_B)
-        
+
         self.lora_alpha = lora_alpha
         self.lora_dropout = nn.Dropout(lora_dropout)
         self.scaling = self.lora_alpha / lora_rank
@@ -573,17 +573,17 @@ class HQQDORA(nn.Module):
         self.base_layer = base_layer
         dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
         device = next(base_layer.parameters()).device
-        
+
         std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
         self.lora_A = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device,dtype=dtype)*std_dev)
         self.lora_B = nn.Parameter(torch.zeros(lora_rank, base_layer.in_features).to(device=device,dtype=dtype))
-        
+
         if not self.base_layer.W_q.is_meta:
             self.dora_scale = nn.Parameter(self.base_layer.cuda().dequantize_aten().data.clone().norm(p=2, dim=0, keepdim=True)).to(device=device,dtype=dtype)
         else:
             self.dora_scale = nn.Parameter(torch.randn((base_layer.in_features,base_layer.out_features), device=device, dtype=dtype))
-    
-    def forward(self, x):        
+
+    def forward(self, x):
         lora = torch.matmul(self.lora_A, self.lora_B)
         adapted = self.base_layer.dequantize_aten() + lora
         column_norm = adapted.norm(p=2, dim=0, keepdim=True)
@@ -603,7 +603,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         rank = int(os.environ['SLURM_PROCID']) * torch.cuda.device_count() + local_rank
     else:
         rank = local_rank
-    
+
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
 
@@ -673,22 +673,21 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        # cfg.num_hidden_layers = 2 # DEBUG
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
             if args["train_type"] in ["hqq_lora", "hqq_dora"]:
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=4, 
-                                                  group_size=64, 
-                                                  quant_zero=True, 
-                                                  quant_scale=True, 
-                                                  offload_meta=True, 
+                quant_config = BaseQuantizeConfig(nbits=4,
+                                                  group_size=64,
+                                                  quant_zero=True,
+                                                  quant_scale=True,
+                                                  offload_meta=True,
                                                   view_as_float=True)
                 model.model = replace_linear_hqq(model.model, quant_config, device_n=torch.cuda.current_device(),
-                                                compute_dtype=compute_dtype, del_orig=True, initialize=False)     
-                HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)              
+                                                compute_dtype=compute_dtype, del_orig=True, initialize=False)
+                HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
             else:
                 model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
                                             quant_type='nf4', quant_storage=torch_dtype)
@@ -712,7 +711,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         def load_and_quantize_parallel(name_param, load_func, model, **kwargs):
             name, param = name_param
             load_func(model, name, param, **kwargs)
-            
+
         print("Loading model", rank)
         start = time.time()
         for filename in files:
@@ -722,18 +721,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             n_workers = min(os.cpu_count(), int(devprops.total_memory*0.25/1e6//600))
             if args['train_type'] == 'hqq_lora':
                 n_workers = 2 # requires hand tuning, around 35GB peak memory on the main GPU for 70B model, high torch allocation.
-            parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True, 
+            parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True,
                      load_func=load_func, model=model, dtype=torch_dtype, device=local_rank,
-                     skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0), 
+                     skip_names=load_param_skip_names, is_meta_rank=(args["low_memory"] and rank!=0),
                      verbose=args["verbose"])
-        if rank == 0: print(f"Loaded model weights in {time.time()-start:.3f} seconds")
-        
-        if args["precision"] == "bf16":
-            # if args['hqq_lora']: 
-            #     # TODO: don't cast HQQLinear.
-            #     raise ValueError("Can't cast model dtype with HQQ LoRA since quantized weights are stored in float32 and handled with .view(), use mixed precision setup.")
-            # model.to(torch_dtype)
-            pass
+        if rank == 0 and args["verbose"]:
+            print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
     print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
@@ -762,8 +755,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
         if args["train_type"] == "hqq_dora":
             print("Using HQQDORA", rank)
-            lora_cls = HQQDORA  
-        else: 
+            lora_cls = HQQDORA
+        else:
             print("Using LORA", rank)
             lora_cls = LORA
         # Create LORA layers.
@@ -805,7 +798,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
     else:
         raise ValueError("Invalid FSDP sharding strategy")
-        
+
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
@@ -835,17 +828,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             checkpoint_wrapper,
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
-                
+
         check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
         print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
         )
-        
+
     if args["use_activation_cpu_offload"]:
         print("Applying activation offloading", rank)
-        model = offload_wrapper(model)                
-        
+        model = offload_wrapper(model)
+
     if rank == 0 and args['verbose']:
         print("Config:")
         print(cfg)
@@ -918,7 +911,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         attention_mask=None,
                     )
                     loss = output.loss
-                
+
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
 
@@ -985,7 +978,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
                 if args["log_to"] == 'wandb':
                     logger.log({"memory_peak": peak_memory}, rank)
-                    
+
     # Synchronize at the end and record time
     dist.barrier()
     torch.cuda.synchronize()
