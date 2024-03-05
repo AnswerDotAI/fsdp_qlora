@@ -660,7 +660,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         for n,p in model.named_parameters():
             if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B']]):
                 p.requires_grad = True
-                print("Trainable LORA layer", n)
+                if args['verbose']:
+                    print("Trainable LORA layer", n)
             else:
                 p.requires_grad = False
 
@@ -859,24 +860,25 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 ddp_loss = torch.zeros(2).to(local_rank)
 
         # Print + log peak memory usage for the whole first step of training
-        if epoch == 0:
+        if epoch == 0 and rank == 0:
             peak_memory = torch.cuda.max_memory_allocated(local_rank)
             if args["verbose"]:
                 print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
-                if args["log_to"] == 'wandb':
-                    logger.log({"memory_peak": peak_memory}, rank)
+            if args["log_to"] == 'wandb':
+                logger.log({"memory_peak": peak_memory}, rank)
 
     # Synchronize at the end and record time
     dist.barrier()
     torch.cuda.synchronize()
     init_end_event.record()
 
-    print("Finished training", rank)
+    if rank == 0:
+        print("Finished training", rank)
 
     # Print time and model
     if rank == 0:
         time_taken = init_start_event.elapsed_time(init_end_event) / 1000
-        print_func(f"CUDA event elapsed time: {time_taken} sec")
+        print(f"CUDA event elapsed time: {time_taken} sec")
         logger.log({"time_taken": time_taken}, rank)
 
     # End logging
