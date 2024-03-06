@@ -564,7 +564,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
             cfg._attn_implementation = attn_impl
-            cfg.num_hidden_layers = 2
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
@@ -892,26 +891,30 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # It might be better to just save the trained lora layers.
     # summon_full_params on lora layers and save.
     if args["save_model"]:
-        if args["train_type"] in ["custom_qlora", "hqq_lora"]:
+        if rank == 0:
+            os.makedirs(args["output_dir"], exist_ok=True)
+        dist.barrier()
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora"]:
             cpu_state_dict = {}
             trainable_modules = [(n,m) for n,m in model.named_modules() if n.endswith('lora_AB')]
-            for prefix,module in trainable_modules:
+            for prefix, module in trainable_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
-                                 .replace("_checkpoint_wrapped_module.", "")
-                                 .replace("_offload_wrapped_module.", ""))
-                with FSDP.summon_full_params(module, rank0_only=True, offload_to_cpu=True):
+                                .replace("_checkpoint_wrapped_module.", "")
+                                .replace("_offload_wrapped_module.", ""))
+                with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
                     cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
+                dist.barrier()
+                torch.cuda.synchronize() 
             if rank==0:
-                print_func("Saving model")
+                print_func("Saving trained LoRA weights.")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
                 print_func("Done", rank)
         else:
-            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
                 cpu_state_dict = model.state_dict()
-                os.makedirs(args["output_dir"], exist_ok=True)
                 if rank==0:
-                    print_func("Saving model")
+                    print_func("Saving full model weights.")
                     save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
                     print_func("Done", rank)
 
