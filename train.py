@@ -56,9 +56,13 @@ from peft import get_peft_model, LoraConfig, TaskType
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
-
-from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
 from fastcore.parallel import parallel
+
+try:
+    from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
+except ImportError:
+    HQQLinear = None
+    pass
 
 # PEFT
 from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
@@ -224,7 +228,7 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
         # it's a buffer
         value = place_on_device(value)
         pass
-    if not isinstance(submodule, HQQLinear):
+    if HQQLinear is None or not isinstance(submodule, HQQLinear):
         setattr(submodule, value_key, value)
 
 
@@ -980,6 +984,9 @@ def main(
         args["no_sync"] = True
     elif args["no_sync"] and args["gradient_accumulation_steps"] == 1:
         args["no_sync"] = False
+
+    if args["train_type"] in ["hqq_lora"] and HQQLinear is None:
+        raise ValueError("HQQ is required to train a `train_type='hqq_lora'`. See ReadMe for details.")
 
     # Run
     mp.spawn(fsdp_main,
