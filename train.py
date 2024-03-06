@@ -17,7 +17,7 @@ import torch, os, gc, time, safetensors, copy, math, types
 import functools
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
-from transformers.optimization import get_linear_schedule_with_warmup, get_constant_schedule
+from transformers.optimization import get_linear_schedule_with_warmup
 import bitsandbytes as bnb
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -33,7 +33,6 @@ from fastcore.script import call_parse, bool_arg, Param
 from torch import nn, Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 # FSDP
 from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
@@ -162,7 +161,7 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False, quant_nethod:str='bnb'):
+                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False, quant_method:str='bnb'):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -188,7 +187,7 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
         return
 
     try:
-        if quant_nethod=='bnb':
+        if quant_method=='bnb':
             param = submodule.get_parameter(value_key)
             if isinstance(param, Params4bit):
                 # With `sync_module_states=True`, a meta device Params4bit needs to be the same
@@ -203,7 +202,7 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     value = type(param)(value.data.to("cpu"), **value.__dict__)
             else:
                 value = type(param)(place_on_device(value).data)
-        elif quant_nethod=='hqq':
+        elif quant_method=='hqq':
             if isinstance(submodule, HQQLinear):
                 if value_key == "weight":
                     # Like `Params4bit`, this workaround quantizes `HQQLinear`` per device so the quantization
@@ -619,7 +618,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 n_workers = 2 # requires hand tuning, around 35GB peak memory on the main GPU for 70B model, high torch allocation.
             parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_nethod=quant_method)
+                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method)
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
