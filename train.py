@@ -80,12 +80,12 @@ except ImportError:
     pass
 
 class Logger:
-    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, rank=0):
+    def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
-            wandb.init(project=project_name, entity=entity, config=args)
+            wandb.init(project=project_name, entity=entity, group=group, name=name, config=args)
 
     def log(self, d:Dict, rank:int):
         if rank != 0: return
@@ -507,7 +507,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     torch.cuda.set_device(local_rank)
 
     # Start logging
-    logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"], entity=args["entity"], rank=rank)
+    logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"],
+                    entity=args["entity"], group=args["group"], name=args["name"], rank=rank)
 
     # Timing stuff
     init_start_event = torch.cuda.Event(enable_timing=True)
@@ -712,7 +713,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if args["use_gradient_checkpointing"]:
         non_reentrant_wrapper = functools.partial(
             checkpoint_wrapper,
-            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_impl=CheckpointImpl.REENTRANT if args['reentrant_checkpointing'] else CheckpointImpl.NO_REENTRANT,
         )
 
         check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
@@ -869,7 +870,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     init_end_event.record()
     dist.barrier()
     torch.cuda.synchronize()
-    
+
     if rank == 0:
         print("Finished training", rank)
 
@@ -905,7 +906,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
                     cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
                 dist.barrier()
-                torch.cuda.synchronize() 
+                torch.cuda.synchronize()
             if rank==0:
                 print_func("Saving trained LoRA weights.")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
@@ -929,31 +930,32 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
     train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
-    batch_size: int = 1, # Batch size per GPU for training
+    batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
-    use_gradient_checkpointing: bool_arg = True, # Whether to use fsdp's activation checkpointing
-    use_cpu_offload: bool_arg = False, # Whether to use fsdp's cpu offload
-    use_activation_cpu_offload: bool_arg = False, # Whether to use activation cpu offload
+    use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
+    reentrant_checkpointing: bool_arg = False, # Use re-entrant autograd activation checkpointing. Setting to True can use less GPU memory with BNB QLoRA
+    use_cpu_offload: bool_arg = True, # Use FSDP's CPU offloading
+    use_activation_cpu_offload: bool_arg = False, # Use FSDP's activation CPU offloading
     low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
     no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    save_model: bool_arg = False, # Whether to save the resulting model
+    save_model: bool_arg = False, # Save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
-    lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for mistral+llama
+    lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
-    apply_gradient_clipping: bool_arg = False, # Whether to apply gradient clipping
+    apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
-    profile_memory: bool_arg = False, # Whether to profile memory usage for the first batch
+    profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
     optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
     log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
@@ -961,6 +963,8 @@ def main(
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
     project_name: str = "fsdp_qlora", # For wandb logging
+    name: str = None, # For wandb logging
+    group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
 ):
 
@@ -991,7 +995,7 @@ def main(
         args["no_sync"] = False
 
     if args["train_type"] in ["hqq_lora"] and HQQLinear is None:
-        raise ValueError("HQQ is required to train a `train_type='hqq_lora'`. See ReadMe for details.")
+        raise ValueError("HQQ is required to train with `train_type='hqq_lora'`. See ReadMe for details.")
 
     # Run
     mp.spawn(fsdp_main,
