@@ -564,6 +564,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             cfg = AutoConfig.from_pretrained(args["model_name"])
             cfg.use_cache = False
             cfg._attn_implementation = attn_impl
+            cfg.num_hidden_layers = 2
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
@@ -866,16 +867,18 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 logger.log({"memory_peak": peak_memory}, rank)
 
     # Synchronize at the end and record time
+    init_end_event.record()
     dist.barrier()
     torch.cuda.synchronize()
-    init_end_event.record()
-
+    
     if rank == 0:
         print("Finished training", rank)
 
     # Print time and model
+    time_taken = init_start_event.elapsed_time(init_end_event) / 1000
+    dist.barrier()
+    torch.cuda.synchronize()
     if rank == 0:
-        time_taken = init_start_event.elapsed_time(init_end_event) / 1000
         print(f"CUDA event elapsed time: {time_taken} sec")
         logger.log({"time_taken": time_taken}, rank)
 
