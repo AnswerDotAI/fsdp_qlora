@@ -49,7 +49,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 # Model loading
-from safetensors import safe_open
 from bitsandbytes.nn import Linear4bit, Params4bit
 from accelerate import init_empty_weights
 from accelerate.utils import set_seed
@@ -58,7 +57,6 @@ from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
-import hqq_aten
 from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
 from fastcore.parallel import parallel
 
@@ -68,9 +66,6 @@ from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 # For different model types, we'll want to import the right class for the
 # check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
-# Set the target class for activation checkpointing here:
-GC_LAYER_CLASS = LlamaDecoderLayer
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -717,7 +712,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             checkpoint_impl=CheckpointImpl.NO_REENTRANT,
         )
 
-        check_fn = lambda submodule: isinstance(submodule, GC_LAYER_CLASS)
+        check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
         print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
