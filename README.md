@@ -8,11 +8,11 @@ The following steps should work (tested on cuda 11.7, 11.8 and 12.1):
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
 - `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes` as an easy way to get most dependencies
 - `pip uninstall bitsandbytes` since for now it must be installed from source to have the necessary changes
-- Clone bitsandbytes (recent version has our changes) or clone AnswerDotAI/bitsandbytes & switch to `cuda_fix_quant_storage_dtype` branch `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
-- in bitsandbytes folder, `make CUDA_VERSION=118` then `python setup.py install` (may need export BNB_CUDA_VERSION=118 and to set cuda path, adjust to your preferred version)
+- To install bitsandbytes from source, follow the instructions [here](https://huggingface.co/docs/bitsandbytes/main/en/installation) or:
+  - clone our branch: `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
+  - in the bitsandbytes folder, run `make CUDA_VERSION=118` then `python setup.py install` (you may need `export BNB_CUDA_VERSION=118`, adjust to your preferred version)
 - `pip install fastcore wandb` as extra requirements above those in llama-recipes
-- huggingface-cli login (to access Llama 2 7B)
-- back in fsdp_qlora folder, run `python train.py` to test qlora training
+- run `huggingface-cli login` (to access Llama 2 7B)
 - HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
 - [Pytorch >= 2.2](https://pytorch.org/blog/pytorch2-2/) is recommended to make use of the native flash-attention 2 kernel.
 
