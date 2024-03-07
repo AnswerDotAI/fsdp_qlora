@@ -6,17 +6,20 @@ Training LLMs with QLoRA + FSDP. This is a demo script, and still a work in prog
 
 The following steps should work (tested on cuda 11.7, 11.8 and 12.1):
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
-- `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes` as an easy way to get most dependencies
-- `pip uninstall bitsandbytes` since for now it must be installed from source to have the necessary changes
-- To install bitsandbytes from source, follow the instructions [here](https://huggingface.co/docs/bitsandbytes/main/en/installation) or:
-  - clone our branch: `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
-  - in the bitsandbytes folder, run `make CUDA_VERSION=118` then `python setup.py install` (you may need `export BNB_CUDA_VERSION=118`, adjust to your preferred version)
+- `pip install --extra-index-url https://download.pytorch.org/whl/test/cu118 llama-recipes` as an easy way to get most dependencies (replace 118 with your desired cuda version)
+- `pip install bitsandbytes>=0.43.0` to make sure you have a version with the required changes
 - `pip install fastcore wandb` as extra requirements above those in llama-recipes
 - run `huggingface-cli login` (to access Llama 2 7B)
-- HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
+- If you want to use HQQ: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
 - [Pytorch >= 2.2](https://pytorch.org/blog/pytorch2-2/) is recommended to make use of the native flash-attention 2 kernel.
 
+To install bitsandbytes from source:
+  - clone our branch: `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
+  - in the bitsandbytes folder, run `make CUDA_VERSION=118` then `python setup.py install` (you may need `export BNB_CUDA_VERSION=118`, adjust to your preferred version)
+
 ## Training Options
+
+For quantization we support HQQ and BitsAndBytes. We're currently doing benchmarking to help you decide which to use. If you do use bitsandbytes, be sure to pass `--reentrant_checkpointing True` to avoid triggering a bug in bitsandbytes which results in high memory usage (a fix is in progress). 
 
 ### `--train_type full`
 
@@ -204,31 +207,6 @@ python train.py \
 ```
 
 **Note:** For large batch size or long context training HQQ LoRA is more memory efficient compared to BnB LoRA. So if you are running into OOM issues, try using HQQ LoRA. For example, HQQ Llama 7b with context length of 512 with bs=32 on 2 40GB A100s and BnB bs=16 requires similar memory.
-
-## What it took to get this working
-
-If you're hoping to get FSDP working with a different quantization approach or to integrate this idea into your own training script, here are some of the key issues to be aware of and how we addressed them:
-
-**Problem 1: FSDP can’t flatten and shard integer dtypes but QLoRA stores quantized weight data in uint8**
-
-Solution: Modify Linear4Bit and Params4Bit to have a configurable quant_storage dtype. This change allows using any float dtype when training with FSDP while defaulting to uint8 for compatibility with existing QLoRA workflows.
-Fortunately, bitsandbytes’ Cuda quantization and dequantization methods reads and writes quantized weights as chars, so this change required minimal modification to the library.
-Many alternatives also use uint8 to store quantized weights, and thus share this FSDP incompatibility. However, our solution of selectable quantization storage dtype should be portable to other quantization methods.
-You can view our changes to bitsandbytes [here](https://github.com/TimDettmers/bitsandbytes/pull/970) and similar changes to hqq [here](https://github.com/mobiusml/hqq/pull/17).
-
-**Problem 2: FSDP re-creates parameters during training, which erases the quant_state needed to dequantize 4-bit params**
-
-Solution: Store the quant_state in the Linear4Bit layer and restore it to Params4Bit when needed.
-This fix is a bit inelegant and will hopefully be unnecessary in a future bitsandbytes release.
-
-**Problem 3: QLoRA quantizes weights whenever a Linear4Bit layer is moved from CPU to GPU, leading to multiple rounds of quantization if using FSDP’s CPU Offloading**
-
-Solution: Add a quantization flag to Params4Bit to prevent multiple rounds of quantization. 
-
-**Problem 4: Wrapping parameters with a mix of requires_grad (as in LoRA/QLoRA where adapters are trainable and base weights are frozen) or a mix of float types doesn’t work with FSDP**
-
-Solution: Wrap trainable and frozen layers separately by wrapping every linear layer individually or by specifying a wrapping policy that singles out LoRA layers. For the latter policy, the quant_storage dtype should match the frozen model’s dtype so FSDP doesn’t unnecessarily require separating quantized Linear4Bit layers.
-
 
 
 ## SLURM Training
