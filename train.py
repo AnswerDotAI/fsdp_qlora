@@ -581,7 +581,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
-                model.model = replace_linear(model.model, HQQLinear, quant_config, device_n=rank,
+                model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
                                              compute_dtype=compute_dtype, del_orig=True, initialize=False)
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
             else:
@@ -619,7 +619,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
             left = int(os.cpu_count()/torch.cuda.device_count())
             right = int(8 * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
-            n_workers = min(left, right)        
+            n_workers = min(left, right)
             if rank == 0 and args['verbose']:
                 print_func(f"Using n_workers: {n_workers} for loading")
             parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True,
