@@ -609,14 +609,19 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             load_and_quantize(model, name, param, **kwargs)
 
         print("Loading model", rank)
+        param_count = sum((p.numel() for n,p in model.named_parameters()))
+        if rank == 0 and args['verbose']:
+            print_func(f"Total model params: {param_count}")
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
             devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
-            n_workers = min(os.cpu_count(), int(devprops.total_memory*0.25/1e6//600))
-            if args['train_type'] == 'hqq_lora':
-                n_workers = 2 # requires hand tuning, around 35GB peak memory on the main GPU for 70B model, high torch allocation.
+            left = int(os.cpu_count()/torch.cuda.device_count())
+            right = int(8 * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
+            n_workers = min(left, right)        
+            if rank == 0 and args['verbose']:
+                print_func(f"Using n_workers: {n_workers} for loading")
             parallel(load_and_quantize_parallel, weights.items(), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method)
@@ -711,9 +716,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
+        if args['reentrant_checkpointing']:
+            model.enable_input_require_grads()
         non_reentrant_wrapper = functools.partial(
             checkpoint_wrapper,
             checkpoint_impl=CheckpointImpl.REENTRANT if args['reentrant_checkpointing'] else CheckpointImpl.NO_REENTRANT,
+
         )
 
         check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
