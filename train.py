@@ -843,6 +843,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Stop logging memory (first iter)
             if batch_idx==0 and rank == 0 and epoch == 0 and args['profile_memory']:
                 torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None) # Stop recording
 
             # Log loss every gradient update steps
             if accumulate_grads:
