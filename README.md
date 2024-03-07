@@ -13,9 +13,7 @@ The following steps should work (tested on cuda 11.7, 11.8 and 12.1):
 - If you want to use HQQ: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
 - [Pytorch >= 2.2](https://pytorch.org/blog/pytorch2-2/) is recommended to make use of the native flash-attention 2 kernel.
 
-To install bitsandbytes from source:
-  - clone our branch: `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
-  - in the bitsandbytes folder, run `make CUDA_VERSION=118` then `python setup.py install` (you may need `export BNB_CUDA_VERSION=118`, adjust to your preferred version)
+To install bitsandbytes from source, please refer to [the proper official documentation section](https://huggingface.co/docs/bitsandbytes/main/en/installation#alternative-compiling-from-source)
 
 ## Training Options
 
