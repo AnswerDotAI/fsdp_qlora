@@ -32,7 +32,7 @@ python train.py \
 --use_gradient_checkpointing true \
 --use_cpu_offload true \
 --dataset alpaca \
---reentrant_checkpointing true \
+--reentrant_checkpointing true
 ```
 
 This requires roughly 55GB of CPU RAM for model loading and FSDP CPU offloading.
@@ -60,7 +60,7 @@ python train.py \
 --use_cpu_offload false \
 --use_activation_cpu_offload false \
 --log_to wandb \
---dataset alpaca \
+--dataset alpaca
 ```
 
 ### `--train_type lora`
@@ -202,7 +202,7 @@ python train.py \
 --reentrant_checkpointing true
 --use_cpu_offload false \
 --log_to stdout \
---dataset alpaca \
+--dataset alpaca
 
 # HQQ QLoRA
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -218,7 +218,7 @@ python train.py \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \
 --log_to stdout \
---dataset alpaca \
+--dataset alpaca
 ```
 
 **Note:** For large batch size or long context training HQQ LoRA is a bit more memory efficient compared to BnB LoRA with re-entrant checkpointing. So if you are running into OOM issues, try using HQQ LoRA.
