@@ -11,13 +11,8 @@ You should treat this script as an alpha/preview release. If you’re not comfor
 The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
 - `pip install llama-recipes fastcore --extra-index-url https://download.pytorch.org/whl/test/cu118` as an easy way to get most dependencies (replace 118 with your desired Cuda version)
-- Install bitsandbytes
-  - `pip uninstall bitsandbytes` since for now it must be installed from source to have the necessary changes
-  - To install bitsandbytes from source, follow the instructions [here](https://huggingface.co/docs/bitsandbytes/main/en/installation) or:
-    - clone our branch: `git clone -b cuda_fix_quant_storage_dtype https://github.com/AnswerDotAI/bitsandbytes`
-    - in the bitsandbytes folder, run `make CUDA_VERSION=118` then `python setup.py install` (you may need `export BNB_CUDA_VERSION=118`, adjust to your preferred version)
-  - Once bitsandbytes 0.43 is released, the above can be replaced with `pip install bitsandbytes>=0.43.0`
-- run `huggingface-cli login` (to access Llama 2)
+- Install bitsandbytes `pip install bitsandbytes>=0.43.0`
+- Run `huggingface-cli login` (to access Llama 2)
 - Optional Libraries:
   - HQQ quantization: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
   - Weights and Biases logging: `pip install wandb`
