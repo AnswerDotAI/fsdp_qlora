@@ -35,8 +35,6 @@ python train.py \
 --reentrant_checkpointing true \
 ```
 
-This requires roughly 55GB of CPU RAM for model loading and FSDP CPU offloading.
-
 ## Training Options
 
 For quantization we support HQQ and bitsandbytes. We're currently doing benchmarking to help you decide which to use. If you do use bitsandbytes, be sure to pass `--reentrant_checkpointing True` to avoid triggering a bug in bitsandbytes which results in high memory usage (a fix is in progress). 
