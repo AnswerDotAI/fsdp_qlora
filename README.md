@@ -159,7 +159,7 @@ As a results, sharded and unsharded params will be stored in bf16. It will use `
 
 This option is important for RoPE layer which gives incorrect results when cast to lower precision especially with longer context lengths.
 
-## Comparinson to an existing trainer
+## Comparison to an existing trainer
 ![Screenshot 2024-02-01 083222](https://github.com/AnswerDotAI/fsdp_qlora/assets/6575163/97bb03fb-c2bb-4679-83ff-63a2e202826f)
 `hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version. 
 
@@ -179,7 +179,7 @@ First, the current release of Transformer `AutoModel.from_pretrained` cannot be 
 
 We are actively working with Hugging Face to resolve this incompatibility in future Transformers and PEFT releases.
 
-Secpnd, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
+Second, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
 
 
 ## Example: Llama 70B 4-A100 40GB Training
