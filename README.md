@@ -6,6 +6,11 @@ Read our [announcement blog post](https://www.answer.ai/posts/2024-03-06-fsdp-ql
 
 You should treat this script as an alpha/preview release. If you’re not comfortable with testing and debugging models, we’d suggest holding off for a few months while the community more fully tests the approach.
 
+## Integrations
+
+FSDP+QLoRA has been integrated into:
+- [Axolotl](https://github.com/OpenAccess-AI-Collective/axolotl/pull/1378): experimental support
+
 ## Installation
 
 The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
@@ -20,26 +25,26 @@ The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
 
 ## Finetune Llama-2 70B on Dual 24GB GPUs
 
-Once installed, run `cd fsdp_qlora` and then run the following command to begin finetuning Llama-2 70B on [Alpaca](https://huggingface.co/datasets/yahma/alpaca-cleaned) at a maximum sequence length of 2048 tokens.
+Once installed, run `cd fsdp_qlora` and then run the following command to begin finetuning Llama-2 70B on [Alpaca](https://huggingface.co/datasets/yahma/alpaca-cleaned) at a maximum sequence length of 512 tokens.
 
 ```bash
 python train.py \
 --model_name meta-llama/Llama-2-70b-hf \
 --batch_size 2 \
---context_length 2048 \
+--context_length 512 \
 --precision bf16 \
 --train_type qlora \
 --use_gradient_checkpointing true \
 --use_cpu_offload true \
 --dataset alpaca \
---reentrant_checkpointing true \
+--reentrant_checkpointing true
 ```
 
 This example command currently uses just over 128GB of CPU RAM. If you only have 128GB available, we recommend making a 10-20GB swap file to accommodate the initial spike in usage.
 
 ## Training Options
 
-For quantization we support HQQ and bitsandbytes. We're currently doing benchmarking to help you decide which to use. If you do use bitsandbytes, be sure to pass `--reentrant_checkpointing True` to avoid triggering a bug in bitsandbytes which results in high memory usage (a fix is in progress). 
+For quantization we support HQQ and bitsandbytes. We're currently doing benchmarking to help you decide which to use. If you do use bitsandbytes, be sure to pass `--reentrant_checkpointing True` to avoid triggering a bug in bitsandbytes which results in high memory usage (a fix is in progress).
 
 ### `--train_type full`
 
@@ -60,7 +65,7 @@ python train.py \
 --use_cpu_offload false \
 --use_activation_cpu_offload false \
 --log_to wandb \
---dataset alpaca \
+--dataset alpaca
 ```
 
 ### `--train_type lora`
@@ -161,15 +166,16 @@ As a results, sharded and unsharded params will be stored in bf16. It will use `
 
 This option is important for RoPE layer which gives incorrect results when cast to lower precision especially with longer context lengths.
 
-## Comparinson to an existing trainer
+## Comparison to an existing trainer
+
 ![Screenshot 2024-02-01 083222](https://github.com/AnswerDotAI/fsdp_qlora/assets/6575163/97bb03fb-c2bb-4679-83ff-63a2e202826f)
-`hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version. 
+`hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version.
 
 ## Converting Saved Models
 
 If you specify `--save_model True` the adapter layers will be saved as a state dict. To convert to the regular Hugging Face format and upload to the hub, see: **Converting the State Dict.ipynb**
 
-If `"custom_qlora", "hqq_lora"` training options are used, then only the trainable LoRA parameters will be saved. Before inference, you need to load and quantize the base model again, and separately load the saved LoRA parameters. 
+If `"custom_qlora", "hqq_lora"` training options are used, then only the trainable LoRA parameters will be saved. Before inference, you need to load and quantize the base model again, and separately load the saved LoRA parameters.
 
 You can alternatively test to see if merging base model weights and trained LoRA weights and then quantizing them performs similar to keeping the parameters separately as done during training. To make use of `torch.compile` with HQQ, see https://github.com/mobiusml/hqq/issues/18.
 
@@ -181,8 +187,7 @@ First, the current release of Transformer `AutoModel.from_pretrained` cannot be 
 
 We are actively working with Hugging Face to resolve this incompatibility in future Transformers and PEFT releases.
 
-Secpnd, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
-
+Second, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
 
 ## Example: Llama 70B 4-A100 40GB Training
 
@@ -202,7 +207,7 @@ python train.py \
 --reentrant_checkpointing true
 --use_cpu_offload false \
 --log_to stdout \
---dataset alpaca \
+--dataset alpaca
 
 # HQQ QLoRA
 export CUDA_VISIBLE_DEVICES=4,5,6,7
@@ -218,7 +223,7 @@ python train.py \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \
 --log_to stdout \
---dataset alpaca \
+--dataset alpaca
 ```
 
 **Note:** For large batch size or long context training HQQ LoRA is a bit more memory efficient compared to BnB LoRA with re-entrant checkpointing. So if you are running into OOM issues, try using HQQ LoRA.
