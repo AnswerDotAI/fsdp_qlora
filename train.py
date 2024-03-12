@@ -1009,5 +1009,5 @@ def main(
     # Run
     mp.spawn(fsdp_main,
         args=(world_size, args),
-        nprocs=torch.cuda.device_count(),
+        nprocs=world_size,
         join=True)
