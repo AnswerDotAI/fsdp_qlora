@@ -110,6 +110,12 @@ def update_progress_bar(progress_bar:tqdm, epoch:int, log_loss:float, log_lr:flo
         else:
             progress_bar.set_description(f"Epoch {epoch}, Loss {log_loss:.3f}", refresh=True)
 
+def n_loading_workers(quant_method:str, param_count:float):
+    devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
+    left = int(os.cpu_count()/torch.cuda.device_count())
+    right = int((4 if quant_method == "hqq" else 8) * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
+    return min(left, right)
+
 
 # Utilities related to model loading
 def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:dict|None=None,
@@ -161,16 +167,16 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False, quant_method:str='bnb'):
+                      skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb'):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
-    Quantizes `Params4bit` on `device` then places on "cpu" if low_memory=True or "meta" if is_meta_rank=True.
+    Quantizes `Params4bit` on `device` then places on "cpu" if to_cpu=True or "meta" if to_meta=True.
     """
     def place_on_device(value):
-        if is_meta_rank:
+        if to_meta:
             device = 'meta'
-        elif low_memory:
+        elif to_cpu:
             device = 'cpu'
         return value.to(device=device, dtype=dtype)
 
@@ -196,9 +202,9 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                 # workaround quantizes Params4bit to initialize quant_state on all ranks, then
                 # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
                 value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
-                if is_meta_rank:
+                if to_meta:
                     value = type(param)(value.data.to("meta"), **value.__dict__)
-                elif low_memory:
+                elif to_cpu:
                     value = type(param)(value.data.to("cpu"), **value.__dict__)
             else:
                 value = type(param)(place_on_device(value).data)
@@ -211,9 +217,9 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
                     submodule.initialize()
 
-                    if is_meta_rank:
+                    if to_meta:
                         setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
-                    elif low_memory:
+                    elif to_cpu:
                         setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
                     submodule.in_gpu = False
 
@@ -608,23 +614,24 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             name, param = name_param
             load_and_quantize(model, name, param, **kwargs)
 
-        print("Loading model", rank)
+        quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
+        print("Loading model", rank)
         if rank == 0 and args['verbose']:
             print_func(f"Total model params: {param_count}")
-        quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
-        devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
-        left = int(os.cpu_count()/torch.cuda.device_count())
-        right = int((4 if quant_method == "hqq" else 8) * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
-        n_workers = min(left, right)
+
+        n_workers = n_loading_workers(quant_method, param_count) if args["loading_workers"]==-1 else args["loading_workers"]
         if rank == 0 and args['verbose']:
             print_func(f"Using n_workers: {n_workers} for loading")
+
         start = time.time()
         for filename in files:
             weights = safetensors.torch.load_file(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method)
+                     to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
+                     verbose=args["verbose"], quant_method=quant_method)
+
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
@@ -967,6 +974,7 @@ def main(
     profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
     optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+    loading_workers: int = -1, # Number of layers to load and quantize in parallel per GPU. Default of -1 uses heuristics to set worker count.
     log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
