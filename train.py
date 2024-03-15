@@ -210,15 +210,15 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
                     submodule.linear_layer.to_empty(device=device)
                     submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
-                    # compute the dora_scale before quantization
-                    # and assign it as a param.
+                    # Compute and set dora_scale before quantization.
                     if is_dora:
                         if is_meta_rank:
-                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to("meta")))
+                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to(dtype=dtype).to("meta")))
                         else:
-                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to("cpu")))                
+                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to(dtype=dtype).to("cpu")))                
+                        print("DORA scale initialized")
                     submodule.initialize()
-
+                    print("Quantized weight:", submodule.in_features, submodule.out_features)
                     if is_meta_rank:
                         setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
                     elif low_memory:
@@ -418,9 +418,15 @@ def get_optimizer(model:nn.Module, args:Dict):
 # This checks for lora layers (has weight and requires_grad)
 def get_wrapping_policy(custom_policy:bool=False):
     if custom_policy:
+        # def lambda_policy_fn(module):
+        #     # LORA trainable layers.
+        #     return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
         def lambda_policy_fn(module):
-            # LORA trainable layers.
-            return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
+            return (
+                len(list(module.named_children())) == 0
+                and module.weight.requires_grad
+            )
+        
     else:
         def lambda_policy_fn(module):
             return (
@@ -497,8 +503,10 @@ class LORA(nn.Module):
         return result
 
 
-# TODO: Do we need a custom backward?
+# TODO: Do we need a custom backward? Probably not.
 # FIXME: Not working now. Need to figure out how to init self.dora_scale
+# https://github.com/catid/dora/blob/main/dora.py#L11
+# Wrapping policy requires modules, base_layer has no grad params, lora_A, lora_B, dora_scale have grad params.
 class HQQDORA(nn.Module):
     def __init__(self, base_layer, lora_rank, *args, **kwargs):
         super().__init__()
@@ -507,8 +515,13 @@ class HQQDORA(nn.Module):
         device = next(base_layer.parameters()).device
 
         std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
-        self.lora_A = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device,dtype=dtype)*std_dev)
-        self.lora_B = nn.Parameter(torch.zeros(lora_rank, base_layer.in_features).to(device=device,dtype=dtype))
+        lora_A_param = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device, dtype=dtype)*std_dev)
+        self.lora_A = nn.Linear(base_layer.out_features, lora_rank, bias=False, device=device, dtype=dtype)
+        setattr(self.lora_A, "weight", lora_A_param)
+        self.lora_B = nn.Linear(lora_rank, base_layer.in_features, bias=False, device=device, dtype=dtype)
+        self.lora_B.weight.data.zero_()
+        
+        self.dora_scale = self.base_layer.dora_scale.clone().detach().requires_grad_(True)
 
     def forward(self, x):
         lora = torch.matmul(self.lora_A, self.lora_B)
@@ -579,7 +592,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg = None
     attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     print("Creating model", rank)
-    if args["train_type"] in ["full", "lora", "custom_lora", "hqq_dora"]:
+    if args["train_type"] in ["full", "lora", "custom_lora"]:
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
                 args["model_name"],
@@ -597,10 +610,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
+        # cfg.num_hidden_layers = 2
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -640,11 +654,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         param_count = sum((p.numel() for n,p in model.named_parameters()))
         if rank == 0 and args['verbose']:
             print_func(f"Total model params: {param_count}")
-        quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
+        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora"] else "bnb"
         devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
         left = int(os.cpu_count()/torch.cuda.device_count())
         right = int((4 if quant_method == "hqq" else 8) * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
-        n_workers = min(left, right)
+        # n_workers = min(left, right)
+        n_workers = 8
         if rank == 0 and args['verbose']:
             print_func(f"Using n_workers: {n_workers} for loading")
         start = time.time()
@@ -652,7 +667,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             weights = safetensors.torch.load_file(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] == "hqq_dora"))
+                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora"]))
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
@@ -696,7 +711,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'dora_scale']]):
                 p.requires_grad = True
                 if args['verbose']:
                     print("Trainable LORA layer", n)
@@ -972,7 +987,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
