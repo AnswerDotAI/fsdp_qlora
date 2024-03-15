@@ -51,7 +51,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from bitsandbytes.nn import Linear4bit, Params4bit
 from accelerate import init_empty_weights
 from accelerate.utils import set_seed
-from peft import get_peft_model, LoraConfig, TaskType
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
@@ -62,9 +61,6 @@ try:
 except ImportError:
     HQQLinear = None
     pass
-
-# PEFT
-from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
 # For different model types, we'll want to import the right class for the
 # check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
@@ -415,6 +411,8 @@ def get_optimizer(model:nn.Module, args:Dict):
 # Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
 def get_wrapping_policy(custom_policy:bool=False):
+    from peft.tuners import PromptEncoder, PromptEmbedding, PrefixEncoder
+
     if custom_policy:
         def lambda_policy_fn(module):
             # LORA trainable layers.
@@ -640,6 +638,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # PEFT setup (LoRA and QLoRA)
     if args["train_type"] in ["lora", "qlora"]:
+        from peft import get_peft_model, LoraConfig, TaskType
+
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM, inference_mode=False,
             r=args["lora_rank"],
