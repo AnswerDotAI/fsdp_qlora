@@ -161,7 +161,8 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False, quant_method:str='bnb'):
+                      skip_names:list[str]=[], is_meta_rank:bool=False, low_memory:bool=True, verbose:bool=False,
+                      quant_method:str='bnb', is_dora:bool=False):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -209,6 +210,13 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
                     submodule.linear_layer.to_empty(device=device)
                     submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
+                    # compute the dora_scale before quantization
+                    # and assign it as a param.
+                    if is_dora:
+                        if is_meta_rank:
+                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to("meta")))
+                        else:
+                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to("cpu")))                
                     submodule.initialize()
 
                     if is_meta_rank:
@@ -489,6 +497,26 @@ class LORA(nn.Module):
         return result
 
 
+# TODO: Do we need a custom backward?
+# FIXME: Not working now. Need to figure out how to init self.dora_scale
+class HQQDORA(nn.Module):
+    def __init__(self, base_layer, lora_rank, *args, **kwargs):
+        super().__init__()
+        self.base_layer = base_layer
+        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
+        device = next(base_layer.parameters()).device
+
+        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
+        self.lora_A = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device,dtype=dtype)*std_dev)
+        self.lora_B = nn.Parameter(torch.zeros(lora_rank, base_layer.in_features).to(device=device,dtype=dtype))
+
+    def forward(self, x):
+        lora = torch.matmul(self.lora_A, self.lora_B)
+        adapted = self.base_layer.dequantize_aten() + lora
+        column_norm = adapted.norm(p=2, dim=0, keepdim=True)
+        calc_weights = self.base_layer.dora_scale * (adapted / column_norm)
+        return torch.matmul(x, calc_weights.t())
+    
 
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
@@ -551,7 +579,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg = None
     attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     print("Creating model", rank)
-    if args["train_type"] in ["full", "lora", "custom_lora"]:
+    if args["train_type"] in ["full", "lora", "custom_lora", "hqq_dora"]:
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
                 args["model_name"],
@@ -577,7 +605,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] in ["hqq_lora"]:
+            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
@@ -624,7 +652,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             weights = safetensors.torch.load_file(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method)
+                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] == "hqq_dora"))
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
@@ -652,13 +680,19 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora"]:
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
+        if args["train_type"] == "hqq_dora":
+            print("Using HQQDORA", rank)
+            lora_cls = HQQDORA
+        else:
+            print("Using LORA", rank)
+            lora_cls = LORA
         # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = LORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
+                qlora_layer = lora_cls(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
@@ -675,7 +709,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora"])
+    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora"])
 
     print("Wrapping model w/ FSDP", rank)
     if args["sharding_strategy"] == "full_shard":

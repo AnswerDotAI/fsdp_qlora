@@ -16,7 +16,7 @@ echo "Number of nodes:= " $SLURM_JOB_NUM_NODES
 echo "Ntasks per node:= "  $SLURM_NTASKS_PER_NODE
 echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 
-export MASTER_PORT=12340
+export MASTER_PORT=12342
 export WORLD_SIZE=$(($SLURM_JOB_NUM_NODES * $SLURM_GPUS_PER_NODE))
 
 ### get the first node name as master address - customized for vgg slurm
@@ -62,21 +62,24 @@ echo "Using nccl from $(python -c 'import torch; print(torch.cuda.nccl.version()
 echo "CUDA_HOME=$CUDA_HOME"
 
 # GLOBAL_BATCH_SIZE=64
-MAX_BATCH_SIZE=8
-GRAD_ACCUM_STEPS=1
+MAX_BATCH_SIZE=1
+# 32 / world size
+GRAD_ACCUM_STEPS=16
 
 srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
 --world_size=$WORLD_SIZE \
 --master_addr=$MASTER_ADDR \
 --master_port=$MASTER_PORT \
---model_name meta-llama/Llama-2-7b-hf \
+--model_name meta-llama/Llama-2-70b-hf \
 --dataset dummy \
---batch_size $MAX_BATCH_SIZE \
---context_length 512 \
---gradient_accumulation_steps $GRAD_ACCUM_STEPS \
---train_type custom_qlora \
---use_gradient_checkpointing True \
---use_activation_cpu_offload True \
---use_cpu_offload False \
---log_to stdout \
+--batch_size 4 \
+--context_length 4096 \
+--gradient_accumulation_steps 2 \
+--train_type hqq_lora \
+--sharding_strategy full_shard \
+--use_gradient_checkpointing true \
+--reentrant_checkpointing false \
+--use_cpu_offload true \
+--use_activation_cpu_offload false \
+--log_to wandb \
 --verbose true

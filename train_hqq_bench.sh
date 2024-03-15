@@ -132,19 +132,42 @@ python train.py \
 --dataset alpaca \
 --verbose true
 
-# HQQ 70B
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+# BNB 70B (re-entrant)
+# ~15 GB/gpu and 110 hours/epoch
+export CUDA_VISIBLE_DEVICES=0,1
 python train.py \
---world_size 4 \
+--world_size 2 \
 --master_port 12356 \
 --model_name meta-llama/Llama-2-70b-hf \
---gradient_accumulation_steps 4 \
+--gradient_accumulation_steps 2 \
 --batch_size 2 \
---context_length 512 \
+--context_length 2048 \
+--precision bf16_buffers_autocast \
+--train_type qlora \
+--use_gradient_checkpointing true \
+--reentrant_checkpointing true \
+--use_activation_cpu_offload false \
+--use_cpu_offload true \
+--log_to wandb \
+--dataset dummy \
+--verbose true
+
+# HQQ 70B (no-re-entrant)
+# ~12 GB/gpu and 68 hours/epoch
+export CUDA_VISIBLE_DEVICES=0,1
+python train.py \
+--world_size 2 \
+--master_port 12356 \
+--model_name meta-llama/Llama-2-70b-hf \
+--gradient_accumulation_steps 2 \
+--batch_size 1 \
+--context_length 4096 \
 --precision bf16_buffers_autocast \
 --train_type hqq_lora \
 --use_gradient_checkpointing true \
---use_cpu_offload false \
+--reentrant_checkpointing false \
+--use_activation_cpu_offload false \
+--use_cpu_offload true \
 --log_to stdout \
---dataset alpaca \
+--dataset dummy \
 --verbose true
