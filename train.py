@@ -51,7 +51,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from bitsandbytes.nn import Linear4bit, Params4bit
 from accelerate import init_empty_weights
 from accelerate.utils import set_seed
-from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
+from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME, WEIGHTS_NAME, WEIGHTS_INDEX_NAME
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 from fastcore.parallel import parallel
@@ -595,13 +595,20 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         # Grab the safetensors files that hold the weights
         try:
-            idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+            try:
+                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+            except OSError:
+                idx = hub.cached_file(args["model_name"], WEIGHTS_INDEX_NAME)
             files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
         except OSError:
             try:
                 # This means the model doesn't have a model.safetensors.index.json because it is not sharded
                 files = []
-                files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
+                try:
+                    model_file = hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME)
+                except OSError:
+                    model_file = hub.cached_file(args["model_name"], WEIGHTS_NAME)
+                files.append(model_file)
             except OSError as e:
                 # This means the model probably doesn't have a safetensors file
                 raise e
@@ -624,7 +631,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         start = time.time()
         for filename in files:
-            weights = safetensors.torch.load_file(filename)
+            if filename.endswith(".safetensors"):
+                weights = safetensors.torch.load_file(filename)
+            else:
+                weights = torch.load(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
