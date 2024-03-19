@@ -171,3 +171,22 @@ python train.py \
 --log_to stdout \
 --dataset dummy \
 --verbose true
+
+
+export CUDA_VISIBLE_DEVICES=0,1
+python train.py \
+--world_size 2 \
+--master_port 12356 \
+--model_name meta-llama/Llama-2-7b-hf \
+--gradient_accumulation_steps 2 \
+--batch_size 1 \
+--context_length 4096 \
+--precision bf16_buffers_autocast \
+--train_type hqq_dora \
+--use_gradient_checkpointing true \
+--reentrant_checkpointing false \
+--use_activation_cpu_offload false \
+--use_cpu_offload true \
+--log_to stdout \
+--dataset dummy \
+--verbose true
