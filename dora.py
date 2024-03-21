@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import bitsandbytes as bnb
 
 # Wrapping policy requires modules, base_layer has no grad params, lora_A, lora_B, dora_scale have grad params.
 class DORALayer(nn.Module):
@@ -75,4 +75,40 @@ class HQQDORA(nn.Module):
     
 class BNBDORA(nn.Module):
     def __init__(self, base_layer, lora_rank, *args, **kwargs):
-        raise NotImplementedError
+        super().__init__()
+        self.base_layer = base_layer
+        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
+        device = next(base_layer.parameters()).device
+        
+        # Init trainable magnitude parameter.
+        self.magnitude_layer = MagnitudeLayer(self.base_layer.dora_scale.clone().to(dtype=dtype), device, dtype)
+        self.base_layer.dora_scale = None
+        torch.cuda.empty_cache()
+        
+        # Init DORA layers.
+        self.dora_layer = DORALayer(base_layer.in_features, base_layer.out_features, lora_rank, device, dtype, *args, **kwargs)
+
+    def forward(self, x, *args, **kwargs):
+        result = self.base_layer(x, *args, **kwargs)
+        # As per Tim Dettmers, for 4bit, we need to defensively clone here.
+        # The reason is that in some cases, an error can occur that backprop
+        # does not work on a manipulated view. This issue may be solved with
+        # newer PyTorch versions but this would need extensive testing to be
+        # sure.
+        result = result.clone()
+
+        requires_conversion = not torch.is_autocast_enabled()
+        if requires_conversion:
+            expected_dtype = result.dtype
+            x = x.to(self.dora_layer.lora_A.weight.dtype)
+
+        # m * (W + AB / ||W + AB||) @ X == m * ((W @ X + AB @ X) / ||W + AB||)
+        output, column_norm = self.dora_layer(x, bnb.functional.dequantize_4bit(self.base_layer.weight.data, 
+                                                                                self.base_layer.weight.quant_state))
+        if requires_conversion:
+            output = output.to(expected_dtype)
+        
+        result += output        
+        result = result / column_norm.view(1,1,-1) #unit vector result.
+        result = self.magnitude_layer(result) #rescaled result.
+        return result

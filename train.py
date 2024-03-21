@@ -83,7 +83,7 @@ except ImportError:
 from lora import LORA
 
 # DORA
-from dora import HQQDORA, DORALayer, MagnitudeLayer
+from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
 
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
@@ -202,6 +202,9 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                 # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
                 # workaround quantizes Params4bit to initialize quant_state on all ranks, then
                 # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+                if is_dora:
+                    setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))                
+                    print("DORA scale initialized")
                 value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
                 if is_meta_rank:
                     value = type(param)(value.data.to("meta"), **value.__dict__)
@@ -537,7 +540,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
@@ -594,7 +597,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             weights = safetensors.torch.load_file(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora"]))
+                     is_meta_rank=(args["low_memory"] and rank!=0), verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
 
@@ -622,10 +625,13 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]:
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]:
         if args["train_type"] == "hqq_dora":
             print("Using HQQDORA", rank)
             lora_cls = HQQDORA
+        elif args["train_type"] == "bnb_dora":
+            print("Using BNB DORA", rank)
+            lora_cls = BNBDORA
         else:
             print("Using LORA", rank)
             lora_cls = LORA
@@ -651,7 +657,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora"])
+    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"])
 
     print("Wrapping model w/ FSDP", rank)
     if args["sharding_strategy"] == "full_shard":
@@ -882,7 +888,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         dist.barrier()
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         # TODO: Modify to save DoRA params: loraA, loraB, magnitude.
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora"]:
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]:
             cpu_state_dict = {}
             trainable_modules = [(n,m) for n,m in model.named_modules() if (n.endswith(('lora_AB', 'lora_A', 'lora_B', 'magnitude_layer')))]
             for prefix, module in trainable_modules:
@@ -915,7 +921,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
