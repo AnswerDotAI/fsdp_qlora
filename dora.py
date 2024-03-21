@@ -61,7 +61,7 @@ class HQQDORA(nn.Module):
         requires_conversion = not torch.is_autocast_enabled()
         if requires_conversion:
             expected_dtype = result.dtype
-            x = x.to(next(iter(self.dora.lora_A)).weight.dtype)
+            x = x.to(self.dora_layer.lora_A.weight.dtype)
 
         # m * (W + AB / ||W + AB||) @ X == m * ((W @ X + AB @ X) / ||W + AB||)
         output, column_norm = self.dora_layer(x, self.base_layer.dequantize_aten())
@@ -72,3 +72,7 @@ class HQQDORA(nn.Module):
         result = result / column_norm.view(1,1,-1) #unit vector result.
         result = self.magnitude_layer(result) #rescaled result.
         return result
+    
+class BNBDORA(nn.Module):
+    def __init__(self, base_layer, lora_rank, *args, **kwargs):
+        raise NotImplementedError
