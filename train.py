@@ -890,11 +890,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # TODO: Modify to save DoRA params: loraA, loraB, magnitude.
         if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]:
             cpu_state_dict = {}
-            trainable_modules = [(n,m) for n,m in model.named_modules() if (n.endswith(('lora_AB', 'lora_A', 'lora_B', 'magnitude_layer')))]
-            for prefix, module in trainable_modules:
+            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if (n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer')))]
+            for prefix, module in trainable_fsdp_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
                                 .replace("_offload_wrapped_module.", ""))
+                print(f"Saving {prefix}")
                 with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
                     cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
                 dist.barrier()
