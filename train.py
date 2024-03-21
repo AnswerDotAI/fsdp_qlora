@@ -511,17 +511,16 @@ class DORALayer(nn.Module):
         self.lora_B = nn.Linear(lora_rank, out_features, bias=False, device=device, dtype=dtype)
         self.lora_B.weight.data.zero_()
     
-    def forward(self, x, frozen_norm):
+    def forward(self, x, frozen_weight):
         output = self.lora_B(self.lora_A(x))
-        # TODO: need frozen_weight - how to do it cheaply.|| W1 + W2 || ≤ || W1 || + || W2 ||
-        print("lora A shape:", self.lora_A.weight.shape)
-        print("lora B shape:", self.lora_B.weight.shape)
-        column_norm = frozen_norm + (self.lora_B.weight @ self.lora_A.weight).norm(p=2, dim=1).detach()
-        print("column norm shape:", column_norm.shape, column_norm.shape == frozen_norm.shape)
+        # print("lora A shape:", self.lora_A.weight.shape)
+        # print("lora B shape:", self.lora_B.weight.shape)
+        column_norm = (frozen_weight + self.lora_B.weight @ self.lora_A.weight).norm(p=2, dim=1).detach()
+        # print("column norm shape:", column_norm.shape, column_norm.shape)
         return output, column_norm
     
 class MagnitudeLayer(nn.Module):
-    "FSDP doesn't work with nn.ParameterDict: https://github.com/pytorch/pytorch/issues/79605"
+    "FSDP doesn't work with nn.ParameterDict hence this module: https://github.com/pytorch/pytorch/issues/79605"
     def __init__(self, vector_data, device, dtype):
         super().__init__()
         self.magnitude = nn.Parameter(vector_data.to(device=device, dtype=dtype))
@@ -561,7 +560,7 @@ class HQQDORA(nn.Module):
             expected_dtype = result.dtype
             x = x.to(next(iter(self.dora.lora_A)).weight.dtype)
 
-        output, column_norm = self.dora_layer(x, self.frozen_norm.to(x.device))
+        output, column_norm = self.dora_layer(x, self.base_layer.dequantize_aten())
         if requires_conversion:
             output = output.to(expected_dtype)
         
@@ -997,7 +996,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # TODO: Modify to save DoRA params: loraA, loraB, magnitude.
         if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora"]:
             cpu_state_dict = {}
-            trainable_modules = [(n,m) for n,m in model.named_modules() if n.endswith('lora_AB')]
+            trainable_modules = [(n,m) for n,m in model.named_modules() if (n.endswith(('lora_AB', 'lora_A', 'lora_B', 'magnitude_layer')))]
             for prefix, module in trainable_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
