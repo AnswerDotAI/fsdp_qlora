@@ -212,10 +212,7 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
                     # Compute and set dora_scale before quantization.
                     if is_dora:
-                        if is_meta_rank:
-                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to(dtype=dtype).to("meta")))
-                        else:
-                            setattr(submodule, "dora_scale", nn.Parameter(value.norm(p=2, dim=0, keepdim=True).to(dtype=dtype).to("cpu")))                
+                        setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))                
                         print("DORA scale initialized")
                     submodule.initialize()
                     print("Quantized weight:", submodule.in_features, submodule.out_features)
@@ -418,15 +415,9 @@ def get_optimizer(model:nn.Module, args:Dict):
 # This checks for lora layers (has weight and requires_grad)
 def get_wrapping_policy(custom_policy:bool=False):
     if custom_policy:
-        # def lambda_policy_fn(module):
-        #     # LORA trainable layers.
-        #     return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
         def lambda_policy_fn(module):
-            return (
-                len(list(module.named_children())) == 0
-                and module.weight.requires_grad
-            )
-        
+            # LORA trainable layers.
+            return (isinstance(module, (nn.Sequential)) and all(m.weight.requires_grad for m in module)) or (isinstance(module, (DORALayer, MagnitudeLayer)))
     else:
         def lambda_policy_fn(module):
             return (
@@ -507,28 +498,77 @@ class LORA(nn.Module):
 # FIXME: Not working now. Need to figure out how to init self.dora_scale
 # https://github.com/catid/dora/blob/main/dora.py#L11
 # Wrapping policy requires modules, base_layer has no grad params, lora_A, lora_B, dora_scale have grad params.
+class DORALayer(nn.Module):
+    "Same as LORA but also returnes weight norm. This will be wrapped as a single FSDP unit"
+    def __init__(self, in_features, out_features, lora_rank, device, dtype, *args, **kwargs):
+        super().__init__()
+        # Init LoRA layers.
+        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
+        lora_A_param = nn.Parameter(torch.randn(lora_rank, in_features).to(device=device, dtype=dtype)*std_dev)
+        self.lora_A = nn.Linear(in_features, lora_rank, bias=False, device=device, dtype=dtype)
+        setattr(self.lora_A, "weight", lora_A_param)
+        
+        self.lora_B = nn.Linear(lora_rank, out_features, bias=False, device=device, dtype=dtype)
+        self.lora_B.weight.data.zero_()
+    
+    def forward(self, x, frozen_norm):
+        output = self.lora_B(self.lora_A(x))
+        # TODO: need frozen_weight - how to do it cheaply.|| W1 + W2 || ≤ || W1 || + || W2 ||
+        print("lora A shape:", self.lora_A.weight.shape)
+        print("lora B shape:", self.lora_B.weight.shape)
+        column_norm = frozen_norm + (self.lora_B.weight @ self.lora_A.weight).norm(p=2, dim=1).detach()
+        print("column norm shape:", column_norm.shape, column_norm.shape == frozen_norm.shape)
+        return output, column_norm
+    
+class MagnitudeLayer(nn.Module):
+    "FSDP doesn't work with nn.ParameterDict: https://github.com/pytorch/pytorch/issues/79605"
+    def __init__(self, vector_data, device, dtype):
+        super().__init__()
+        self.magnitude = nn.Parameter(vector_data.to(device=device, dtype=dtype))
+        
+    def forward(self, x):
+        return x * self.magnitude.reshape(1,1,-1)
+    
 class HQQDORA(nn.Module):
     def __init__(self, base_layer, lora_rank, *args, **kwargs):
         super().__init__()
         self.base_layer = base_layer
         dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
         device = next(base_layer.parameters()).device
-
-        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
-        lora_A_param = nn.Parameter(torch.randn(base_layer.out_features, lora_rank).to(device=device, dtype=dtype)*std_dev)
-        self.lora_A = nn.Linear(base_layer.out_features, lora_rank, bias=False, device=device, dtype=dtype)
-        setattr(self.lora_A, "weight", lora_A_param)
-        self.lora_B = nn.Linear(lora_rank, base_layer.in_features, bias=False, device=device, dtype=dtype)
-        self.lora_B.weight.data.zero_()
         
-        self.dora_scale = self.base_layer.dora_scale.clone().detach().requires_grad_(True)
+        # Constant weight norm and trainable magnitude parameter.
+        self.frozen_norm = self.base_layer.dora_scale.clone().to(dtype=dtype)
+        self.base_layer.dora_scale = None
+        torch.cuda.empty_cache()
+        # Wrap with ModuleDict for FSDP wrapping.
+        # self.magnitude_dict = nn.ParameterDict({"magnitude":nn.Parameter(self.frozen_norm.clone().to(device=device, dtype=dtype))})
+        self.magnitude_layer = MagnitudeLayer(self.frozen_norm.data.clone(), device, dtype)
+        
+        # Init DORA layers.
+        self.dora_layer = DORALayer(base_layer.in_features, base_layer.out_features, lora_rank, device, dtype, *args, **kwargs)
 
-    def forward(self, x):
-        lora = torch.matmul(self.lora_A, self.lora_B)
-        adapted = self.base_layer.dequantize_aten() + lora
-        column_norm = adapted.norm(p=2, dim=0, keepdim=True)
-        calc_weights = self.base_layer.dora_scale * (adapted / column_norm)
-        return torch.matmul(x, calc_weights.t())
+    def forward(self, x, *args, **kwargs):
+        result = self.base_layer(x, *args, **kwargs)
+        # As per Tim Dettmers, for 4bit, we need to defensively clone here.
+        # The reason is that in some cases, an error can occur that backprop
+        # does not work on a manipulated view. This issue may be solved with
+        # newer PyTorch versions but this would need extensive testing to be
+        # sure.
+        result = result.clone()
+
+        requires_conversion = not torch.is_autocast_enabled()
+        if requires_conversion:
+            expected_dtype = result.dtype
+            x = x.to(next(iter(self.dora.lora_A)).weight.dtype)
+
+        output, column_norm = self.dora_layer(x, self.frozen_norm.to(x.device))
+        if requires_conversion:
+            output = output.to(expected_dtype)
+        
+        result += output        
+        result = result / column_norm.reshape(1,1,-1) #unit vector result.
+        result = self.magnitude_layer(result) #rescaled result.
+        return result
     
 
 # Main function, run on each process
@@ -614,7 +654,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        # cfg.num_hidden_layers = 2
+        cfg.num_hidden_layers = 2
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
@@ -711,7 +751,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'dora_scale']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'magnitude']]):
                 p.requires_grad = True
                 if args['verbose']:
                     print("Trainable LORA layer", n)
@@ -954,7 +994,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             os.makedirs(args["output_dir"], exist_ok=True)
         dist.barrier()
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora"]:
+        # TODO: Modify to save DoRA params: loraA, loraB, magnitude.
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora"]:
             cpu_state_dict = {}
             trainable_modules = [(n,m) for n,m in model.named_modules() if n.endswith('lora_AB')]
             for prefix, module in trainable_modules:
