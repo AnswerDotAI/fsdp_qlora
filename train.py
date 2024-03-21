@@ -496,8 +496,6 @@ class LORA(nn.Module):
 
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
-    print_func = tqdm.write if args["log_to"] == 'tqdm' else print
-
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
     os.environ['MASTER_PORT'] = args["master_port"]
@@ -554,7 +552,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Create model
     cfg = None
     attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
-    print("Creating model", rank)
+    if rank == 0 or args['verbose']:
+        print("Creating model", rank)
     if args["train_type"] in ["full", "lora", "custom_lora"]:
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_pretrained(
@@ -614,16 +613,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
-        print("Loading model", rank)
+        if rank == 0 or args['verbose']:
+            print("Loading model", rank)
         if rank == 0 and args['verbose']:
-            print_func(f"Total model params: {param_count}")
+            print(f"Total model params: {param_count}")
 
         n_workers = n_loading_workers(quant_method, param_count) if args["loading_workers"]==-1 else args["loading_workers"]
         if rank == 0 and args['verbose']:
-            print_func(f"Using n_workers: {n_workers} for loading")
+            print(f"Using n_workers: {n_workers} for loading")
 
         start = time.time()
-        for filename in files:
+        for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
             weights = safetensors.torch.load_file(filename)
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
@@ -632,8 +632,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
-
-    print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
+    if rank == 0 or args['verbose']:
+        print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
 
     # PEFT setup (LoRA and QLoRA)
@@ -675,8 +675,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     print("Trainable LORA layer", n)
             else:
                 p.requires_grad = False
-
-        print("LoRA layers added", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
+        if rank == 0 or args['verbose']:
+            print("LoRA layers added", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
     logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(local_rank)}, rank)
 
@@ -684,7 +684,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora"])
 
-    print("Wrapping model w/ FSDP", rank)
+    if rank == 0 or args['verbose']:
+        print("Wrapping model w/ FSDP", rank)
+
     if args["sharding_strategy"] == "full_shard":
         sharding_strategy = ShardingStrategy.FULL_SHARD
     elif args["sharding_strategy"] == "shard_grad_op":
@@ -712,7 +714,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
     )
-    print("Wrapped model", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
+    if rank == 0 or args['verbose']:
+        print("Wrapped model", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
     logger.log({"memory_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank)
 
 
@@ -732,13 +735,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         )
 
         check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
-        print("Applying activation checkpointing", rank)
+        if rank == 0 or args['verbose']:
+            print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
             model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
         )
 
     if args["use_activation_cpu_offload"]:
-        print("Applying activation offloading", rank)
+        if rank == 0 or args['verbose']:
+            print("Applying activation offloading", rank)
         model = offload_wrapper(model)
 
     if rank == 0 and args['verbose']:
@@ -878,7 +883,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         if epoch == 0 and rank == 0:
             peak_memory = torch.cuda.max_memory_allocated(local_rank)
             if args["verbose"]:
-                print_func(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
+                print(f"Peak memory usage (training): {peak_memory/1e9:.2f}GB", rank)
             if args["log_to"] == 'wandb':
                 logger.log({"memory_peak": peak_memory}, rank)
 
@@ -924,16 +929,16 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 dist.barrier()
                 torch.cuda.synchronize()
             if rank==0:
-                print_func("Saving trained LoRA weights.")
+                print("Saving trained LoRA weights.")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                print_func("Done", rank)
+                print("Done", rank)
         else:
             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
                 cpu_state_dict = model.state_dict()
                 if rank==0:
-                    print_func("Saving full model weights.")
+                    print("Saving full model weights.")
                     save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                    print_func("Done", rank)
+                    print("Done", rank)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
