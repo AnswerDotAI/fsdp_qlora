@@ -135,10 +135,14 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:d
             List of modules names not to convert. Defaults to `lm_head`.
     """
     for name, module in model.named_children():
+        if name in skip_modules:
+            print(f"Skipping {name}")
+            continue
+        
         if len(list(module.children())) > 0:
             replace_linear(module, linear_replacement, quant_config, skip_modules, **kwargs)
 
-        if isinstance(module, torch.nn.Linear) and all(n not in name for n in skip_modules):
+        if isinstance(module, torch.nn.Linear):
             if issubclass(linear_replacement, Linear4bit):
                 model._modules[name] = linear_replacement(
                     module.in_features,
@@ -425,7 +429,7 @@ def get_optimizer(model:nn.Module, args:Dict):
 
 # Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
-def get_wrapping_policy(custom_policy:bool=False):
+def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
     if custom_policy:
         def lambda_policy_fn(module):
             # LORA trainable layers.
@@ -458,6 +462,9 @@ def get_wrapping_policy(custom_policy:bool=False):
             transformer_layer_name,
         ),
     )
+    if vanilla_policy:
+        return transformer_wrap_policy
+    
     policies=[lambda_policy, transformer_wrap_policy]
     if custom_policy:
         policies.extend([self_attn_policy, mlp_policy])
@@ -557,8 +564,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             split = int(num_original_layers / (num_expanded_layers - num_original_layers))
             new_layer_ids = [split+(split+1)*n for n in range(total_new_layers)]
             new_layer_names = [f"layers.{i}" for i in new_layer_ids]
-            skip_modules += new_layer_names
+            skip_modules += [str(lid) for lid in new_layer_ids]
             cfg.num_hidden_layers = num_expanded_layers
+
+            print("skip_modules", skip_modules)
         
         # cfg.num_hidden_layers = 2
 
@@ -592,6 +601,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 except OSError as e:
                     # This means the model probably doesn't have a safetensors file
                     raise e
+        print("loading model from safetensors files", files)
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
@@ -684,7 +694,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"])
+    my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"], 
+                                              vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
 
     print("Wrapping model w/ FSDP", rank)
     if args["sharding_strategy"] == "full_shard":
