@@ -1,48 +1,62 @@
 
 import argparse
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig
 import torch
+from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
+import safetensors
+from safetensors.torch import save_file
+import os 
+from pathlib import Path
 
 def main():
     # Set up the argument parser
     parser = argparse.ArgumentParser(description="Receive deepen model's args")
-    parser.add_argument("--model_path", default='meta-llama/Llama-2-7b-hf', type=str, help="original model path")
-    parser.add_argument("--output_path", default='pytorch_model.bin', type=str, help="deepened model ckpt save path")
-    parser.add_argument("--original_layers", default=32, type=int, help="original model num layers")
-    parser.add_argument("--layers", default=40, type=int, help="deepen model num layers")
+    parser.add_argument("--model_name", default='meta-llama/Llama-2-7b-hf', type=str, help="original model path")
+    parser.add_argument("--output_dir", default=None, type=str, help="deepened model ckpt save path")
+    parser.add_argument("--expansion_rate", default=0.1, type=float, help="add new trainable layer % of layers")
 
     # Parse the arguments
     args = parser.parse_args()
-
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=torch.float16)
-    ckpt = model.state_dict()
     
     split = int(args.original_layers / (args.layers - args.original_layers))
     layer_cnt = 0
-
-    output = {}
-    for i in range(args.original_layers):
-        for k in ckpt:
-            if ('layers.' + str(i) + '.') in k:
-                output[k.replace(('layers.' + str(i) + '.'), ('layers.' + str(layer_cnt) + '.'))] = ckpt[k]
-        layer_cnt += 1
-        if (i+1) % split == 0:
-            for k in ckpt:
-                if ('layers.' + str(i) + '.') in k:
+    
+    idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+    files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
+    
+    cfg = AutoConfig.from_pretrained(args["model_name"])
+    num_original_layers = cfg.num_hidden_layers
+    new_layers = num_original_layers + int(num_original_layers * args.expansion_rate)
+    
+    split = int(num_original_layers / (new_layers - num_original_layers))
+    layer_cnt = 0
+    
+    if args.output_dir is None:
+        args.output_dir = Path(os.environ['HOME'])/'models'/args.model_name + f'_blk_exp-{num_original_layers}-{new_layers}'
+        os.makedirs(args.output_dir, exist_ok=True)
+    
+    for filename in files:
+        weights = safetensors.torch.load_file(filename)
+        expanded_weights = {}
+        for k,v in iter(weights.items()):
+            if 'layers' in k:
+                layer_no = int(k.split('layers.')[1].split('.')[0])
+                # shift existing layers
+                new_layer_no = layer_no + layer_no // split
+                new_k = k.replace(f'layers.{layer_no}', f'layers.{new_layer_no}')
+                expanded_weights[new_k] = v
+                # add new layers
+                if (layer_no+1) % split == 0:
+                    new_layer_no += 1
+                    new_k = k.replace(f'layers.{layer_no}', f'layers.{new_layer_no}')
                     if 'down_proj' in k or 'o_proj' in k:
-                        output[k.replace(('layers.' + str(i) + '.'), ('layers.' + str(layer_cnt) + '.'))] = torch.zeros_like(ckpt[k])
+                        expanded_weights[new_k] = torch.zeros_like(v)     
                     else:
-                        output[k.replace(('layers.' + str(i) + '.'), ('layers.' + str(layer_cnt) + '.'))] = ckpt[k]
-
-
-            layer_cnt += 1
-        
-    assert layer_cnt==args.layers
-    for k in ckpt:
-        if not 'layers' in k:
-            output[k] = ckpt[k]
-
-    torch.save(output, args.output_path)
+                        expanded_weights[new_k] = v
+            else:
+                expanded_weights[k] = v
+        save_file(expanded_weights, args.output_dir/Path(filename).name)
+    
 
 if __name__ == "__main__":
     main()
