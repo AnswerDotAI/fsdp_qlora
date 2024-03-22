@@ -13,27 +13,25 @@ def main():
     parser = argparse.ArgumentParser(description="Receive deepen model's args")
     parser.add_argument("--model_name", default='meta-llama/Llama-2-7b-hf', type=str, help="original model path")
     parser.add_argument("--output_dir", default=None, type=str, help="deepened model ckpt save path")
-    parser.add_argument("--expansion_rate", default=0.1, type=float, help="add new trainable layer % of layers")
+    parser.add_argument("--expansion_rate", default=0.1, type=float, help="add new trainable % of layers")
 
     # Parse the arguments
     args = parser.parse_args()
+        
+    idx = hub.cached_file(args.model_name, SAFE_WEIGHTS_INDEX_NAME)
+    files, _ = hub.get_checkpoint_shard_files(args.model_name, idx)
     
-    split = int(args.original_layers / (args.layers - args.original_layers))
-    layer_cnt = 0
-    
-    idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-    files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-    
-    cfg = AutoConfig.from_pretrained(args["model_name"])
+    cfg = AutoConfig.from_pretrained(args.model_name)
     num_original_layers = cfg.num_hidden_layers
     new_layers = num_original_layers + int(num_original_layers * args.expansion_rate)
     
     split = int(num_original_layers / (new_layers - num_original_layers))
-    layer_cnt = 0
     
     if args.output_dir is None:
-        args.output_dir = Path(os.environ['HOME'])/'models'/args.model_name + f'_blk_exp-{num_original_layers}-{new_layers}'
-        os.makedirs(args.output_dir, exist_ok=True)
+        output_dir = Path(os.environ['HOME'])/'models'/(args.model_name + f'_blk_exp-{num_original_layers}-{new_layers}')
+    else:
+        output_dir = Path(args.output_dir)/(args.model_name + f'_blk_exp-{num_original_layers}-{new_layers}')
+    os.makedirs(output_dir, exist_ok=True)
     
     for filename in files:
         weights = safetensors.torch.load_file(filename)
@@ -52,10 +50,10 @@ def main():
                     if 'down_proj' in k or 'o_proj' in k:
                         expanded_weights[new_k] = torch.zeros_like(v)     
                     else:
-                        expanded_weights[new_k] = v
+                        expanded_weights[new_k] = v.clone()
             else:
                 expanded_weights[k] = v
-        save_file(expanded_weights, args.output_dir/Path(filename).name)
+        save_file(expanded_weights, output_dir/Path(filename).name)
     
 
 if __name__ == "__main__":

@@ -85,6 +85,9 @@ from lora import LORA
 # DORA
 from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
 
+from pathlib import Path
+from glob import glob
+
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
@@ -135,7 +138,7 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:d
         if len(list(module.children())) > 0:
             replace_linear(module, linear_replacement, quant_config, skip_modules, **kwargs)
 
-        if isinstance(module, torch.nn.Linear) and name not in skip_modules:
+        if isinstance(module, torch.nn.Linear) and all(n not in name for n in skip_modules):
             if issubclass(linear_replacement, Linear4bit):
                 model._modules[name] = linear_replacement(
                     module.in_features,
@@ -540,39 +543,55 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        cfg.num_hidden_layers = 2
+        skip_modules = ["lm_head"]
+        
+        if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+            llama_pro_path = Path(args["llama_pro_path"])
+            num_original_layers, num_expanded_layers = llama_pro_path.name.split("blk_exp-")[1].split("-")
+            num_original_layers, num_expanded_layers = int(num_original_layers), int(num_expanded_layers)
+            total_new_layers = num_expanded_layers - num_original_layers
+            split = int(num_original_layers / (num_expanded_layers - num_original_layers))
+            new_layer_ids = [split+(split+1)*n for n in range(total_new_layers)]
+            new_layer_names = [f"layers.{i}" for i in new_layer_ids]
+            skip_modules += new_layer_names
+            cfg.num_hidden_layers = num_expanded_layers
+        
+        # cfg.num_hidden_layers = 2
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
+            if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
                 model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
-                                             compute_dtype=compute_dtype, del_orig=True, initialize=False)
+                                             compute_dtype=compute_dtype, del_orig=True, initialize=False, skip_modules=skip_modules)
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
             else:
                 model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                             quant_type='nf4', quant_storage=torch_dtype)
+                                             quant_type='nf4', quant_storage=torch_dtype, skip_modules=skip_modules)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
-        try:
-            idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-            files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-        except OSError:
+        if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+            files = glob(str(llama_pro_path/"*.safetensors"))
+        else:
             try:
-                # This means the model doesn't have a model.safetensors.index.json because it is not sharded
-                files = []
-                files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
-            except OSError as e:
-                # This means the model probably doesn't have a safetensors file
-                raise e
+                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+                files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
+            except OSError:
+                try:
+                    # This means the model doesn't have a model.safetensors.index.json because it is not sharded
+                    files = []
+                    files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
+                except OSError as e:
+                    # This means the model probably doesn't have a safetensors file
+                    raise e
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
@@ -652,6 +671,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 p.requires_grad = False
 
         print("LoRA layers added", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
+    elif args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+        for n,p in model.named_parameters():
+            if any([layer_name in n for layer_name in new_layer_names]):
+                p.requires_grad = True
+                if args['verbose']:
+                    print("Trainable Llama-Pro layer", n)
+            else:
+                p.requires_grad = False
 
     logger.log({"memory_after_model_creation": torch.cuda.memory_allocated(local_rank)}, rank)
 
@@ -922,7 +949,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    llama_pro_path: str = None, # Path to the quantized llama pro model
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
