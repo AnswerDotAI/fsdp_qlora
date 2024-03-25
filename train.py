@@ -346,8 +346,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = dataset.select(range(1000,len(dataset)))
     elif args["dataset"] == "orca_math":
         dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
-        # train with 10k for starters.
-        dataset = dataset.select(range(0,10000))
+        # train with 10k for starters. Then 100k.
+        dataset = dataset.select(range(0,100000))
 
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
@@ -941,7 +941,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]:
             cpu_state_dict = {}
             if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
-                trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(new_layer_names)]
+                trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(tuple(new_layer_names))]
             else:
                 trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
             for prefix, module in trainable_fsdp_modules:
