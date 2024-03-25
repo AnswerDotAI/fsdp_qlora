@@ -287,6 +287,11 @@ class InstructionDataset(Dataset):
             sample = self.dataset[index]
             prompt = prompt_template.format_map(sample)
             example = prompt + sample['answer']
+        elif self.style == "qna_no_ctx":
+            prompt_template = "###Question:\n{question}\n###Answer:\n"
+            sample = self.dataset[index]
+            prompt = prompt_template.format_map(sample)
+            example = prompt + sample['answer']            
         else: # Alpaca
             ann = self.dataset[index]
             if ann.get("input", "") == "":
@@ -339,6 +344,10 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("knowrohit07/know_sql")['validation']
         dataset = dataset.shuffle(seed=args["seed"])
         dataset = dataset.select(range(1000,len(dataset)))
+    elif args["dataset"] == "orca_math":
+        dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
+        # train with 10k for starters.
+        dataset = dataset.select(range(0,10000))
 
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
@@ -348,6 +357,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
     elif args["dataset"] == "sql":
         dataset = InstructionDataset(dataset, tokenizer, style="qna")
+    elif args["dataset"] == "orca_math":
+        dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
     else: # (w/ alpaca prompt formatting)
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
 
@@ -613,7 +624,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         param_count = sum((p.numel() for n,p in model.named_parameters()))
         if rank == 0 and args['verbose']:
             print_func(f"Total model params: {param_count}")
-        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora"] else "bnb"
+        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"] else "bnb"
         devprops = torch.cuda.get_device_properties(torch.cuda.current_device())
         left = int(os.cpu_count()/torch.cuda.device_count())
         right = int((4 if quant_method == "hqq" else 8) * (devprops.total_memory/1e9/40) * (70/(param_count/1e9)))
@@ -927,10 +938,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             os.makedirs(args["output_dir"], exist_ok=True)
         dist.barrier()
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        # TODO: Modify to save DoRA params: loraA, loraB, magnitude.
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]:
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]:
             cpu_state_dict = {}
-            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if (n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer')))]
+            if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+                trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(new_layer_names)]
+            else:
+                trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
             for prefix, module in trainable_fsdp_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
@@ -968,7 +981,7 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
     reentrant_checkpointing: bool_arg = False, # Use re-entrant autograd activation checkpointing. Setting to True can use less GPU memory with BNB QLoRA
