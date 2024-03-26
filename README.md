@@ -232,3 +232,35 @@ python train.py \
 ## SLURM Training
 
 See `fsdp_multi_node.sh` for an example training script using multi-node training with SLURM.
+
+## Add support for a new model
+
+First, import the new model's transformer, attention, and MLP layers from Transformers:
+
+```python
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
+```
+
+Then in the `get_wrapping_policy` function, add the attention, MLP, and transformer layers to the `self_attn_policy_fn`, `mlp_policy_fn`, and `transformer_wrap_policy` wrapping policy methods:
+
+```python
+def get_wrapping_policy(custom_policy:bool=False):
+
+    def self_attn_policy_fn(module):
+        return isinstance(module, tuple(*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values()))
+
+    def mlp_policy_fn(module):
+        return isinstance(module, (LlamaMLP, MistralMLP))
+
+    transformer_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
+    )
+```
+
+Finally, add gradient checkpointing support by adding the transformer layer to `check_fn`:
+
+```python
+if args["use_gradient_checkpointing"]:
+    check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer))
+```

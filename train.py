@@ -1,13 +1,15 @@
 """
-This script trains a model using FSDP. It pulls inspiration from
+Read our announcement blog post: https://www.answer.ai/posts/2024-03-06-fsdp-qlora.html.
+
+This script trains a model using FSDP with LoRA & QLoRA. It pulls inspiration from
 - llama-recipes (https://github.com/facebookresearch/llama-recipes/blob/main/src/llama_recipes/finetuning.py)
 - PyTorch FSDP docs (https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html)
 - bitsandbytes (https://github.com/TimDettmers/bitsandbytes)
 
 For information on the different arguments, run `python train.py --help`
 
-This is still a WIP and has currently only been tested with Llama 7B, Mistal 7B, & TinyLlama on a single node w/ 2 GPUs.
-Not all combinations of arguments will work. See the accompanying blog post for more details.
+You should treat this script as an alpha/preview release. If you're not comfortable with testing and debugging
+models, we'd suggest holding off for a few months while the community more fully tests the approach.
 """
 
 # Imports
@@ -62,9 +64,10 @@ except ImportError:
     HQQLinear = None
     pass
 
-# For different model types, we'll want to import the right class for the
-# check_fn in activation checkpointing (LlamaDecoderLayer for llama models for example)
+# To add a new model, import the transformer, attention, & MLP layers
+# for the wrapping policy and `check_fn` in activation checkpointing
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -312,7 +315,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = Dataset.from_dict({
             'instruction': ["instruction"]*args["dataset_samples"],
             'input': ["input"]*args["dataset_samples"],
-            'output': ["output"*10000]*args["dataset_samples"]} # A long output to test memory usage (gets truncated)
+            'output': ["output"*args["context_length"]*2]*args["dataset_samples"]} # A long output to test memory usage (gets truncated)
         )
     elif args["dataset"] == "guanaco":
         dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
@@ -426,24 +429,18 @@ def get_wrapping_policy(custom_policy:bool=False):
             )
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, tuple(LLAMA_ATTENTION_CLASSES.values()))
+        return isinstance(module, tuple(*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values()))
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, LlamaMLP)
+        return isinstance(module, (LlamaMLP, MistralMLP))
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
     mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
-    transformer_layer_name = LlamaDecoderLayer
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls=(
-            PrefixEncoder,
-            PromptEncoder,
-            PromptEmbedding,
-            transformer_layer_name,
-        ),
+        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
     )
     policies=[lambda_policy, transformer_wrap_policy]
     if custom_policy:
@@ -632,6 +629,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
+        # cleanup any extra memory usage from parallel loading
+        torch.cuda.empty_cache()
     if rank == 0 or args['verbose']:
         print("Model created", rank, f"{torch.cuda.memory_allocated(local_rank)/1e9:.3f} GB")
 
@@ -722,8 +721,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Synchronize at the start
     dist.barrier()
 
-    # model = torch.compile(model)
-
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
         if args['reentrant_checkpointing']:
@@ -734,7 +731,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         )
 
-        check_fn = lambda submodule: isinstance(submodule, LlamaDecoderLayer)
+        check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer))
         if rank == 0 or args['verbose']:
             print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
