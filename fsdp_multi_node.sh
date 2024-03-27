@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=256gb
 #SBATCH --cpus-per-gpu=12
-#SBATCH --job-name=fsdp-multi-node-test
+#SBATCH --job-name=fsdp-quantized-ft-exps
 #SBATCH --output=sbatch_outputs/%x_%j.out
 
 ##### Number of total processes 
@@ -66,20 +66,224 @@ MAX_BATCH_SIZE=1
 # 32 / world size
 GRAD_ACCUM_STEPS=16
 
-srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
---world_size=$WORLD_SIZE \
---master_addr=$MASTER_ADDR \
---master_port=$MASTER_PORT \
---model_name meta-llama/Llama-2-70b-hf \
---dataset dummy \
---batch_size 4 \
---context_length 4096 \
---gradient_accumulation_steps 2 \
---train_type hqq_lora \
---sharding_strategy full_shard \
---use_gradient_checkpointing true \
---reentrant_checkpointing false \
---use_cpu_offload true \
---use_activation_cpu_offload false \
---log_to wandb \
---verbose true
+
+# Full finetune.
+# QLORA
+# QDORA
+# Q-LLAMA-Pro
+
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --dataset dummy \
+# --batch_size 1 \
+# --context_length 512 \
+# --gradient_accumulation_steps 1 \
+# --train_type hqq_llama_pro \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-7b-hf_blk_exp-32-35" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to stdout \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/test-llama-pro"
+
+
+# # Full finetune.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type full \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-7b-hf_blk_exp-32-35" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-full"
+
+
+# # QLoRA.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type qlora \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-7b-hf_blk_exp-32-35" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-qlora"
+
+
+# # QDORA.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type bnb_dora \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-7b-hf_blk_exp-32-35" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-qdora"
+
+
+# # Quantized-Llama-Pro.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-7b-hf \
+# --dataset orca_math \
+# --batch_size 8 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 1 \
+# --train_type bnb_llama_pro \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-7b-hf_blk_exp-32-35" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-llama-pro"
+
+
+### 70B ###
+
+# # Full finetune.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-70b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type full \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-70b-hf_blk_exp-80-88" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-full"
+
+
+# # QLoRA.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-70b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type qlora \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-70b-hf_blk_exp-80-88" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-qlora"
+
+
+# # QDORA.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-70b-hf \
+# --dataset orca_math \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --train_type bnb_dora \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-70b-hf_blk_exp-80-88" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-qdora"
+
+
+# # Quantized-Llama-Pro.
+# srun python $SHARED_VOLUME_DIR/git/fsdp_qlora/train.py \
+# --world_size=$WORLD_SIZE \
+# --master_addr=$MASTER_ADDR \
+# --master_port=$MASTER_PORT \
+# --model_name meta-llama/Llama-2-70b-hf \
+# --dataset orca_math \
+# --batch_size 8 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 1 \
+# --train_type bnb_llama_pro \
+# --llama_pro_path $SHARED_VOLUME_DIR/"models/meta-llama/Llama-2-70b-hf_blk_exp-80-88" \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir $SHARED_VOLUME_DIR/"models/llama-7b-orca-math-100k-bnb-llama-pro"
