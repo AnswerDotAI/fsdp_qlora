@@ -7,3 +7,4 @@ nbs/profile_snapshots
 nbs/tmp-*
 data/
 sbatch_outputs/
+eval_results/
