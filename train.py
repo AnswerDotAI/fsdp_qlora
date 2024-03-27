@@ -705,7 +705,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if rank == 0 and args['verbose']:
         print(model)
 
-    # FIXME: hqq_llama_pro
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"], 
                                               vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
