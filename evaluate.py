@@ -35,6 +35,9 @@ def main(
 
     args = dict(locals())
     
+    save_dir = Path(args['save_path']).parent
+    os.makedirs(save_dir, exist_ok=True)
+    
     dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
     # train with 10k for starters. Then 100k.
     # dataset = dataset.select(range(0,100000))
@@ -133,9 +136,11 @@ def main(
             if n in trained_weights: 
                 print("Loading trained params:", n)
                 p.data.copy_(trained_weights[n])
-        
-        
-    model.eval().cuda()
+
+    try:           
+        model.eval().cuda()
+    except:
+        import pdb; pdb.set_trace()
 
     # limit to 500 for now.
     valid_dataset = dataset.select(range(500))
