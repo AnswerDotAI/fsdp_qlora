@@ -12,4 +12,5 @@ python bench_inference.py \
 
 python bench_inference.py \
 --infer_type gptq_marlin \
---model_dir /workspace/models/llama-7b-orca-math-100k-bnb-qdora-marlin
+--model_dir /workspace/models/llama-7b-orca-math-100k-bnb-qdora-marlin \
+--tensor_parallel_size 2
