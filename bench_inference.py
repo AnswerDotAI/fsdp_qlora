@@ -47,10 +47,14 @@ def main(
     model_dir: str = None, 
     model_name: str = "meta-llama/Llama-2-7b-hf", 
     tensor_parallel_size: int = 4,
+    save_filename: str = None,
 ):
     args = dict(locals())
     print(args)
     
+    save_filename = Path(args["save_filename"])
+    os.makedirs(save_filename.parent, exist_ok=True)
+
     tokenizer = AutoTokenizer.from_pretrained(args["model_name"])
     tokenizer.pad_token_id = tokenizer.unk_token_id
     tokenizer.pad_token = tokenizer.unk_token
@@ -92,7 +96,6 @@ def main(
     elif args["infer_type"] == "gptq_marlin":
         llm = LLM(model=args["model_dir"], 
             tokenizer=args["model_name"], 
-            dtype="float16", 
             tensor_parallel_size=args["tensor_parallel_size"], 
             enforce_eager=False, 
             quantization="marlin", 
@@ -122,3 +125,7 @@ def main(
     
     # Pretty print.
     print(json.dumps(metrics, indent=2))
+    
+    # save metrics.
+    with open(save_filename, 'w') as f:
+        json.dump(metrics, f, indent=2)

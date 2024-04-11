@@ -8,3 +8,4 @@ nbs/tmp-*
 data/
 sbatch_outputs/
 eval_results/
+infer_results/
