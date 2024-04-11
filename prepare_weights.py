@@ -55,12 +55,11 @@ def main(
     for filename in pretrained_files:
         pretrained_weights = safetensors.torch.load_file(filename)
         for n,p in tqdm(iter(pretrained_weights.items())):
-            p = p.to(dtype)
-            
             if any(l in n for l in quantized_layers) and "weight" in n:
                 # output_size x input_size
                 input_size, output_size = p.shape
-                param = Params4bit(p, quant_type="nf4", blocksize=blocksize, compress_statistics=False, quant_storage=torch.uint8)
+                param = Params4bit(p, quant_type="nf4", blocksize=blocksize, dtype=dtype,
+                                   compress_statistics=False, quant_storage=torch.uint8)
                 param.cuda()
                 
                 if args["infer_type"] in ["full_post_quant", "bnb_dora"]:
