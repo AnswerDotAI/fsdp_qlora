@@ -346,7 +346,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     elif args["dataset"] == "orca_math":
         dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
         # train with 10k for starters. Then 100k.
-        dataset = dataset.select(range(0,100000))
+        dataset = dataset.select(range(0,args['dataset_samples']))
         
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
@@ -455,7 +455,7 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
             )
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, tuple(*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values()))
+        return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values())))
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
