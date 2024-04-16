@@ -7,3 +7,9 @@ nbs/profile_snapshots
 nbs/tmp-*
 data/
 sbatch_outputs/
+
+# python ignores
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
