@@ -115,6 +115,24 @@ LoRA fine-tuning using a custom LoRA module.
 + --train_type hqq_lora \
 ```
 
+### `--train_type bnb_dora`
+
+4-bit quantized DoRA fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization and a custom DoRA module.
+
+```diff
+- --train_type full \
++ --train_type bnb_dora \
+```
+
+### `--train_type hqq_dora`
+
+4-bit quantized DoRA fine-tuning using HQQ library and a custom DoRA module.
+
+```diff
+- --train_type full \
++ --train_type hqq_dora \
+```
+
 ## Low Memory Loading
 
 During quantized LoRA training we use a custom quantization and loading code to avoid loading the entire model into GPU memory before sharding it across GPUs. This is the default behavior of our training script when any of the following training options `"qlora", "custom_qlora", "hqq_lora"` is used. Other training options are already optimized for low memory loading to their best extent.
