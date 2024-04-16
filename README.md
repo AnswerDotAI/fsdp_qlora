@@ -133,6 +133,44 @@ LoRA fine-tuning using a custom LoRA module.
 + --train_type hqq_dora \
 ```
 
+### `--train_type bnb_llama_pro`
+
+4-bit quantized Llama-Pro fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization.
+
+To create llama-pro weights, run the following command:
+
+```bash
+python scripts/block_expansion.py \
+--model_name meta-llama/Llama-2-7b-hf \
+--output_dir /path/to/llama_pro_weights_directory \
+--expansion_rate 0.1
+```
+
+```diff
+- --train_type full \
++ --train_type bnb_llama_pro \
++ --llama_pro_path /path/to/llama_pro_weights_directory \
+```
+
+### `--train_type hqq_llama_pro`
+
+4-bit quantized Llama-Pro fine-tuning using HQQ library.
+
+To create llama-pro weights, run the following command:
+
+```bash
+python scripts/block_expansion.py \
+--model_name meta-llama/Llama-2-7b-hf \
+--output_dir /path/to/llama_pro_weights_directory \
+--expansion_rate 0.1
+```
+
+```diff
+- --train_type full \
++ --train_type hqq_llama_pro \
++ --llama_pro_path /path/to/llama_pro_weights_directory \
+```
+
 ## Low Memory Loading
 
 During quantized LoRA training we use a custom quantization and loading code to avoid loading the entire model into GPU memory before sharding it across GPUs. This is the default behavior of our training script when any of the following training options `"qlora", "custom_qlora", "hqq_lora"` is used. Other training options are already optimized for low memory loading to their best extent.
