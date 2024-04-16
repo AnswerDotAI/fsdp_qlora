@@ -15,7 +15,7 @@ models, we'd suggest holding off for a few months while the community more fully
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy, math, types
+import torch, os, gc, time, safetensors, copy, math, types, sys
 import functools
 import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
@@ -27,6 +27,8 @@ from contextlib import nullcontext
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
 from typing import List, Dict
+from pathlib import Path
+from glob import glob
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
@@ -77,6 +79,11 @@ try:
     import wandb
 except ImportError:
     pass
+
+# LoRA and DORA modules
+sys.path.append("./scripts")
+from lora import LORA
+from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
 
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
@@ -131,10 +138,13 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:d
             List of modules names not to convert. Defaults to `lm_head`.
     """
     for name, module in model.named_children():
+        if name in skip_modules:
+            continue
+        
         if len(list(module.children())) > 0:
             replace_linear(module, linear_replacement, quant_config, skip_modules, **kwargs)
 
-        if isinstance(module, torch.nn.Linear) and name not in skip_modules:
+        if isinstance(module, torch.nn.Linear):
             if issubclass(linear_replacement, Linear4bit):
                 model._modules[name] = linear_replacement(
                     module.in_features,
@@ -166,7 +176,8 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state._orig_to = None
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
-                      skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb'):
+                      skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb',
+                      is_dora:bool=False):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -200,6 +211,8 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                 # FSDP only syncs parameters and buffers, so the quant_state isn't copied. This
                 # workaround quantizes Params4bit to initialize quant_state on all ranks, then
                 # replaces Params4bit's data with a meta tensor to free memory on non-rank 0.
+                if is_dora:
+                    setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
                 value = type(param)(value.to(device=device, dtype=dtype).data, **param.__dict__).cuda(device)
                 if to_meta:
                     value = type(param)(value.data.to("meta"), **value.__dict__)
@@ -214,6 +227,8 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
                     submodule.linear_layer.to_empty(device=device)
                     submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
+                    if is_dora:
+                        setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
                     submodule.initialize()
 
                     if to_meta:
@@ -271,6 +286,11 @@ class InstructionDataset(Dataset):
             sample = self.dataset[index]
             prompt = prompt_template.format_map(sample)
             example = prompt + sample['answer']
+        elif self.style == "qna_no_ctx":
+            prompt_template = "###Question:\n{question}\n###Answer:\n"
+            sample = self.dataset[index]
+            prompt = prompt_template.format_map(sample)
+            example = prompt + sample['answer']           
         else: # Alpaca
             ann = self.dataset[index]
             if ann.get("input", "") == "":
@@ -323,7 +343,11 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("knowrohit07/know_sql")['validation']
         dataset = dataset.shuffle(seed=args["seed"])
         dataset = dataset.select(range(1000,len(dataset)))
-
+    elif args["dataset"] == "orca_math":
+        dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
+        # train with 10k for starters. Then 100k.
+        dataset = dataset.select(range(0,100000))
+        
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
 
@@ -332,6 +356,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
     elif args["dataset"] == "sql":
         dataset = InstructionDataset(dataset, tokenizer, style="qna")
+    elif args["dataset"] == "orca_math":
+        dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
     else: # (w/ alpaca prompt formatting)
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
 
@@ -413,13 +439,13 @@ def get_optimizer(model:nn.Module, args:Dict):
 
 # Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
-def get_wrapping_policy(custom_policy:bool=False):
+def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
     from peft.tuners import PromptEncoder, PromptEmbedding, PrefixEncoder
 
     if custom_policy:
         def lambda_policy_fn(module):
-            # LORA trainable layers.
-            return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module))
+            # LoRA and DoRA trainable layers.
+            return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module)) or (isinstance(module, (DORALayer, MagnitudeLayer)))
     else:
         def lambda_policy_fn(module):
             return (
@@ -442,53 +468,13 @@ def get_wrapping_policy(custom_policy:bool=False):
         transformer_auto_wrap_policy,
         transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
     )
+    if vanilla_policy:
+        return transformer_wrap_policy
+    
     policies=[lambda_policy, transformer_wrap_policy]
     if custom_policy:
         policies.extend([self_attn_policy, mlp_policy])
     return functools.partial(_or_policy, policies=policies)
-
-
-# Custom LORA module.
-class LORA(nn.Module):
-    def __init__(self, base_layer, lora_rank, lora_alpha, lora_dropout):
-        super().__init__()
-        self.base_layer = base_layer
-        dtype = getattr(base_layer, "compute_dtype", next(base_layer.parameters()).dtype)
-        device = next(base_layer.parameters()).device
-        lora_A = nn.Linear(base_layer.in_features, lora_rank, bias=False, device=device, dtype=dtype)
-        lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
-        lora_B.weight.data.zero_()
-
-        self.lora_AB = nn.Sequential(lora_A, lora_B)
-
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = nn.Dropout(lora_dropout)
-        self.scaling = self.lora_alpha / lora_rank
-
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-
-        result = self.base_layer(x, *args, **kwargs)
-        # As per Tim Dettmers, for 4bit, we need to defensively clone here.
-        # The reason is that in some cases, an error can occur that backprop
-        # does not work on a manipulated view. This issue may be solved with
-        # newer PyTorch versions but this would need extensive testing to be
-        # sure.
-        result = result.clone()
-
-        requires_conversion = not torch.is_autocast_enabled()
-        if requires_conversion:
-            expected_dtype = result.dtype
-            x = x.to(next(iter(self.lora_AB)).weight.dtype)
-
-        output = self.lora_AB(self.lora_dropout(x))
-        if requires_conversion:
-            output = output.to(expected_dtype)
-        output = output * self.scaling
-
-        result += output
-
-        return result
-
 
 
 # Main function, run on each process
@@ -569,24 +555,25 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
+        skip_modules = ["lm_head"]
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] in ["hqq_lora"]:
+            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
                 model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
-                                             compute_dtype=compute_dtype, del_orig=True, initialize=False)
+                                             compute_dtype=compute_dtype, del_orig=True, initialize=False, skip_modules=skip_modules)
                 HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
             else:
                 model.model = replace_linear(model.model, Linear4bit, compute_dtype=compute_dtype,
-                                             quant_type='nf4', quant_storage=torch_dtype)
+                                             quant_type='nf4', quant_storage=torch_dtype, skip_modules=skip_modules)
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
@@ -608,7 +595,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             name, param = name_param
             load_and_quantize(model, name, param, **kwargs)
 
-        quant_method = "hqq" if args["train_type"] in ["hqq_lora"] else "bnb"
+        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
         if rank == 0 or args['verbose']:
             print("Loading model", rank)
@@ -625,7 +612,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
-                     verbose=args["verbose"], quant_method=quant_method)
+                     verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
 
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
@@ -658,17 +645,26 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         elif args['low_memory']:
             # And then setup_quantized_peft_meta_for_training sets quant_state.to back to normal
             setup_quantized_peft_meta_for_training(model)
-    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora"]:
+    elif args["train_type"] in ["custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]:
+        if args["train_type"] == "hqq_dora":
+            print("Using HQQDORA", rank)
+            lora_cls = HQQDORA
+        elif args["train_type"] == "bnb_dora":
+            print("Using BNB DORA", rank)
+            lora_cls = BNBDORA
+        else:
+            print("Using LORA", rank)
+            lora_cls = LORA
         # Create LORA layers.
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
             if value_key in args['lora_target_modules']:
                 m = model.get_submodule(name)
-                qlora_layer = LORA(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
+                qlora_layer = lora_cls(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
         for n,p in model.named_parameters():
-            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B']]):
+            if any([lora_name in n for lora_name in ['lora_AB', 'lora_A', 'lora_B', 'magnitude']]):
                 p.requires_grad = True
                 if args['verbose']:
                     print("Trainable LORA layer", n)
@@ -683,7 +679,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(args["train_type"] in ["custom_qlora", "hqq_lora"])
+    my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"], 
+                                              vanilla_policy=args["train_type"] in ["full"])
 
     if rank == 0 or args['verbose']:
         print("Wrapping model w/ FSDP", rank)
@@ -935,13 +932,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             os.makedirs(args["output_dir"], exist_ok=True)
         dist.barrier()
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora"]:
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]:
             cpu_state_dict = {}
-            trainable_modules = [(n,m) for n,m in model.named_modules() if n.endswith('lora_AB')]
-            for prefix, module in trainable_modules:
+            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
+            for prefix, module in trainable_fsdp_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
                                 .replace("_offload_wrapped_module.", ""))
+                if args['verbose']: print(f"Saving {prefix}")
                 with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
                     cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
                 dist.barrier()
@@ -968,12 +966,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     dataset_samples: int = 512, # Number of samples in an epoch if using "alpaca_sample" or "dummy" dataset
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
