@@ -555,16 +555,27 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
-    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]: # Our custom loading
+    elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
+        
+        if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+            llama_pro_path = Path(args["llama_pro_path"])
+            num_original_layers, num_expanded_layers = llama_pro_path.name.split("blk_exp-")[1].split("-")
+            num_original_layers, num_expanded_layers = int(num_original_layers), int(num_expanded_layers)
+            total_new_layers = num_expanded_layers - num_original_layers
+            split = int(num_original_layers / (num_expanded_layers - num_original_layers))
+            new_layer_ids = [split+(split+1)*n for n in range(total_new_layers)]
+            new_layer_names = [f"layers.{i}" for i in new_layer_ids]
+            skip_modules += [str(lid) for lid in new_layer_ids]
+            cfg.num_hidden_layers = num_expanded_layers
 
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            if args["train_type"] in ["hqq_lora", "hqq_dora"]:
+            if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
@@ -577,17 +588,20 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         model.is_loaded_in_4bit = True
 
         # Grab the safetensors files that hold the weights
-        try:
-            idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-            files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-        except OSError:
+        if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+            files = glob(str(llama_pro_path/"*.safetensors"))
+        else:
             try:
-                # This means the model doesn't have a model.safetensors.index.json because it is not sharded
-                files = []
-                files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
-            except OSError as e:
-                # This means the model probably doesn't have a safetensors file
-                raise e
+                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+                files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
+            except OSError:
+                try:
+                    # This means the model doesn't have a model.safetensors.index.json because it is not sharded
+                    files = []
+                    files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
+                except OSError as e:
+                    # This means the model probably doesn't have a safetensors file
+                    raise e
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
@@ -595,7 +609,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             name, param = name_param
             load_and_quantize(model, name, param, **kwargs)
 
-        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora"] else "bnb"
+        quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
         if rank == 0 or args['verbose']:
             print("Loading model", rank)
@@ -673,6 +687,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         if rank == 0 or args['verbose']:
             print(f"Rank {rank}: LoRA layers added: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
 
+    elif args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+        for n,p in model.named_parameters():
+            if any([layer_name in n for layer_name in new_layer_names]):
+                p.requires_grad = True
+                if args['verbose']:
+                    print("Trainable Llama-Pro layer", n)
+            else:
+                p.requires_grad = False
+                
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank)
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
@@ -680,7 +703,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"], 
-                                              vanilla_policy=args["train_type"] in ["full"])
+                                              vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
 
     if rank == 0 or args['verbose']:
         print("Wrapping model w/ FSDP", rank)
@@ -932,9 +955,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             os.makedirs(args["output_dir"], exist_ok=True)
         dist.barrier()
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"]:
+        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]:
             cpu_state_dict = {}
-            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
+            if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+                trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(tuple(new_layer_names))]
+            else:
+                trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
             for prefix, module in trainable_fsdp_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
@@ -966,7 +992,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    llama_pro_path: str = None, # Path to the quantized llama pro model
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
