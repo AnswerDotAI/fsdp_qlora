@@ -70,6 +70,7 @@ except ImportError:
 # for the wrapping policy and `check_fn` in activation checkpointing
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, QWEN2_ATTENTION_CLASSES, Qwen2MLP, Qwen2FlashAttention2
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -440,7 +441,7 @@ def get_optimizer(model:nn.Module, args:Dict):
 # Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
 def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
-    from peft.tuners import PromptEncoder, PromptEmbedding, PrefixEncoder
+    # from peft.tuners import PromptEncoder, PromptEmbedding, PrefixEncoder
 
     if custom_policy:
         def lambda_policy_fn(module):
@@ -455,18 +456,20 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
             )
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values())))
+        return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), 
+                                         *MISTRAL_ATTENTION_CLASSES.values(),
+                                         *QWEN2_ATTENTION_CLASSES.values())))
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, (LlamaMLP, MistralMLP))
+        return isinstance(module, (LlamaMLP, MistralMLP, Qwen2MLP))
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
     mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
+        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer),
     )
     if vanilla_policy:
         return transformer_wrap_policy
@@ -534,7 +537,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Create model
     cfg = None
-    attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
+    # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
+    attn_impl = "flash_attention_2"
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
     if args["train_type"] in ["full", "lora", "custom_lora"]:
@@ -575,6 +579,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
+            
+            # For some reason slower.
+            for layer in model.model.layers: 
+                m = getattr(layer, 'self_attn')
+                setattr(layer, 'self_attn', Qwen2FlashAttention2(m.config, m.layer_idx))
+            model.config._attn_implementation = "flash_attention_2"
+            model.config._attn_implementation_internal = "flash_attention_2"
+            
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
                 quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
@@ -616,7 +628,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         if rank == 0 and args['verbose']:
             print(f"Total model params: {param_count}")
 
-        n_workers = n_loading_workers(quant_method, param_count) if args["loading_workers"]==-1 else args["loading_workers"]
+        # n_workers = n_loading_workers(quant_method, param_count) if args["loading_workers"]==-1 else args["loading_workers"]
+        n_workers = 8
         if rank == 0 and args['verbose']:
             print(f"Using n_workers: {n_workers} for loading")
 
@@ -755,7 +768,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         )
 
-        check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer))
+        check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer))
         if rank == 0 or args['verbose']:
             print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
@@ -815,6 +828,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
+            print("Batch Size:", batch['input_ids'].size())
             # Prevent gradient syncing until update step if using no_sync option.
             # Documentation states this should only be used on the root FSDP instance
             # We assume this is a one-node setup
