@@ -325,7 +325,10 @@ class InstructionDataset(Dataset):
 def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     """Creates a dataset and appropriate dataloader with distributed sampler."""
     # Importing here rather than at the start to avoid multiprocessing issues
-    from datasets import Dataset, load_dataset
+    from datasets import Dataset, load_dataset, load_from_disk
+    
+    dataset_path = Path(args['dataset'])
+    is_local = dataset_path.exists() and dataset_path.is_dir()
 
     # Load the source dataset
     if args["dataset"] == "alpaca":
@@ -348,6 +351,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
         # train with 10k for starters. Then 100k.
         dataset = dataset.select(range(0,args['dataset_samples']))
+    elif args['dataset'] == "local":
+        dataset = load_from_disk(args.)
         
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
