@@ -15,7 +15,7 @@ FSDP+QLoRA has been integrated into:
 
 The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
 - Clone https://github.com/AnswerDotAI/fsdp_qlora
-- `pip install llama-recipes fastcore --extra-index-url https://download.pytorch.org/whl/test/cu118` as an easy way to get most dependencies (replace 118 with your desired Cuda version)
+- `pip install llama-recipes fastcore "transformers!=4.38.*,!=4.39.*" --extra-index-url https://download.pytorch.org/whl/test/cu118` as an easy way to get most dependencies (replace 118 with your desired Cuda version)
 - Install bitsandbytes `pip install bitsandbytes>=0.43.0`
 - Run `huggingface-cli login` (to access Llama 2)
 - Optional Libraries:
