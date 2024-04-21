@@ -356,7 +356,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         # train with 10k for starters. Then 100k.
         dataset = dataset.select(range(0,args['dataset_samples']))
     elif is_local:
-        dataset = load_from_disk(str(dataset_path))
+        dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])
         
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
