@@ -593,7 +593,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Set up dataloader
     dataloader = get_dataloader(tokenizer, args)
 
-
     # Create model
     cfg = None
     # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
@@ -624,6 +623,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
         if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
+            if args["precision"] in ["bf16", "fp16"]:
+                logger.error(f"Rope scaling will give high loss when casted with long context, we recommend using 'bf16_buffers_autocast'.")
             rope_scaling_factor= args["context_length"] / cfg.max_position_embeddings
             cfg.rope_scaling = {}
             cfg.rope_scaling["type"] = args["rope_type"]
