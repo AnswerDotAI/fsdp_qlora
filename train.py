@@ -68,8 +68,8 @@ except ImportError:
 
 # To add a new model, import the transformer, attention, & MLP layers
 # for the wrapping policy and `check_fn` in activation checkpointing
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP, LlamaFlashAttention2
+from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP, MistralFlashAttention2
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, QWEN2_ATTENTION_CLASSES, Qwen2MLP, Qwen2FlashAttention2
 
 # To get rid of tokenizers warnings for now
@@ -238,8 +238,8 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                         setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
                     submodule.in_gpu = False
 
-                if value_key == "bias":
-                    raise ValueError("Bias not supported in HQQLinear yet!")
+                # if value_key == "bias":
+                #     raise ValueError("Bias not supported in HQQLinear yet!")
             else:
                 param = submodule.get_parameter(value_key)
                 value = type(param)(place_on_device(value).data)
@@ -250,7 +250,54 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
         pass
     if HQQLinear is None or not isinstance(submodule, HQQLinear):
         setattr(submodule, value_key, value)
+        
+def load_bias(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
+                      skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb',
+                      is_dora:bool=False):
+    """
+    Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
+    Quantizes `Params4bit` on `device` then places on "cpu" if to_cpu=True or "meta" if to_meta=True.
+    """
+    def place_on_device(value):
+        if to_meta:
+            device = 'meta'
+        elif to_cpu:
+            device = 'cpu'
+        return value.to(device=device, dtype=dtype)
+
+    if any([skip_name in name for skip_name in skip_names]):
+        if verbose:
+            print(f"Skipping {name} because it is in skip_names")
+        return
+
+    module_key, _, value_key = name.rpartition('.')
+    try:
+        submodule = module.get_submodule(module_key)
+    except AttributeError as e:
+        print(f"Module {module_key} not found:\n{e}")
+        return
+
+    try:
+        if quant_method=='bnb':
+            pass
+        elif quant_method=='hqq':
+            if isinstance(submodule, HQQLinear):
+                if value_key == "weight":
+                    pass
+                if value_key == "bias":
+                    value = place_on_device(value)
+                    if to_meta:
+                        setattr(submodule, "bias", nn.Parameter(value))
+                    elif to_cpu:
+                        setattr(submodule, "bias", nn.Parameter(value))
+            else:
+                pass
+
+    except AttributeError:
+        # it's a buffer
+        # value = place_on_device(value)
+        pass
 
 # DATASET + DATALOADERS (modified from llama recipes)
 # Formatting prompts in alpaca
@@ -356,8 +403,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         # train with 10k for starters. Then 100k.
         dataset = dataset.select(range(0,args['dataset_samples']))
     elif is_local:
-        dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])
-        
+        dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])        
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
 
@@ -422,7 +468,8 @@ def get_cosine_one_cycle_scheduler(optimizer:optim.Optimizer, num_warmup_steps:i
 def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_accumulation_steps:int, args:Dict):
     """Returns linear, cosine, or constant learning rate scheduler"""
     num_training_steps = args['num_epochs'] * len(dataloader) // gradient_accumulation_steps
-    num_warmup_steps = int(num_training_steps * 0.1)
+    # num_warmup_steps = int(num_training_steps * 0.1)
+    num_warmup_steps = 0
     if args['lr_scheduler'] == "linear":
         lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     elif args['lr_scheduler'] == "cosine":
@@ -576,6 +623,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
+        if args["context_length"] > cfg.max_position_embeddings:
+            rope_scaling_factor= args["context_length"] / cfg.max_position_embeddings
+            cfg.rope_theta = rope_scaling_factor
+            cfg.rope_scaling = {}
+            cfg.rope_scaling["type"] = "linear"
+            cfg.rope_scaling["factor"] = rope_scaling_factor
+            cfg._rope_scaling_validation()
+            
+        cfg.max_position_embeddings = args["context_length"]
         
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             llama_pro_path = Path(args["llama_pro_path"])
@@ -591,13 +647,20 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # load model on meta device without calling init and replace nn.Linear with Linear4bit
         with init_empty_weights():
             model = AutoModelForCausalLM.from_config(cfg)
-            
+            model_type = cfg.model_type
             # For some reason slower.
-            for layer in model.model.layers: 
-                m = getattr(layer, 'self_attn')
-                setattr(layer, 'self_attn', Qwen2FlashAttention2(m.config, m.layer_idx))
-            model.config._attn_implementation = "flash_attention_2"
-            model.config._attn_implementation_internal = "flash_attention_2"
+            if attn_impl == "flash_attention_2":
+                if model_type == "qwen2":
+                    attn_cls = Qwen2FlashAttention2
+                elif model_type == "llama":
+                    attn_cls = LlamaFlashAttention2
+                elif model_type == "mistral":
+                    attn_cls = MistralFlashAttention2
+                for layer in model.model.layers: 
+                    m = getattr(layer, 'self_attn')
+                    setattr(layer, 'self_attn', attn_cls(m.config, m.layer_idx))
+                model.config._attn_implementation = "flash_attention_2"
+                model.config._attn_implementation_internal = "flash_attention_2"
             
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
@@ -632,6 +695,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         def load_and_quantize_parallel(name_param, model, **kwargs):
             name, param = name_param
             load_and_quantize(model, name, param, **kwargs)
+            
+        def load_bias_parallel(name_param, model, **kwargs):
+            name, param = name_param
+            load_bias(model, name, param, **kwargs)
 
         quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
@@ -652,7 +719,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
                      verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
-
+            parallel(load_bias_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
+                     model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
+                     to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
+                     verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
+            
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
         # cleanup any extra memory usage from parallel loading
@@ -750,7 +821,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         model,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
-        # backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
+        backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
         use_orig_params=False,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
@@ -840,7 +911,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
-            print("Batch Size:", batch['input_ids'].size())
+            print(f"[rank {local_rank}] Batch Size:", batch['input_ids'].size())
             # Prevent gradient syncing until update step if using no_sync option.
             # Documentation states this should only be used on the root FSDP instance
             # We assume this is a one-node setup
