@@ -625,13 +625,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         skip_modules = ["lm_head"]
         if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
             rope_scaling_factor= args["context_length"] / cfg.max_position_embeddings
-            cfg.rope_theta = rope_scaling_factor
             cfg.rope_scaling = {}
             cfg.rope_scaling["type"] = args["rope_type"]
             cfg.rope_scaling["factor"] = rope_scaling_factor
             cfg._rope_scaling_validation()
-            
-        cfg.max_position_embeddings = args["context_length"]
+        if args["rope_type"] != "dynamic":
+            cfg.max_position_embeddings = args["context_length"]
         
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             llama_pro_path = Path(args["llama_pro_path"])
