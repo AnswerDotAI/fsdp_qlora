@@ -627,7 +627,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             rope_scaling_factor= args["context_length"] / cfg.max_position_embeddings
             cfg.rope_theta = rope_scaling_factor
             cfg.rope_scaling = {}
-            cfg.rope_scaling["type"] = "linear"
+            cfg.rope_scaling["type"] = args["rope_type"]
             cfg.rope_scaling["factor"] = rope_scaling_factor
             cfg._rope_scaling_validation()
             
@@ -1118,6 +1118,7 @@ def main(
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
     scale_rope: bool_arg = False, # Scale the rope if context_length > max_position_embeddings
+    rope_type: Param("", choices=["linear", "dynamic"]) = "linear", # Rope scaling type
     profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
     optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
