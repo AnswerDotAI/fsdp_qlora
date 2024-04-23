@@ -623,7 +623,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
-        if args["context_length"] > cfg.max_position_embeddings:
+        if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
             rope_scaling_factor= args["context_length"] / cfg.max_position_embeddings
             cfg.rope_theta = rope_scaling_factor
             cfg.rope_scaling = {}
@@ -1117,6 +1117,7 @@ def main(
     apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
+    scale_rope: bool_arg = False, # Scale the rope if context_length > max_position_embeddings
     profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
     optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
