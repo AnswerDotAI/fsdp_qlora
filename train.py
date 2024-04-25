@@ -1071,6 +1071,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 print("Saving trained LoRA weights.")
                 save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
                 print("Done", rank)
+                print("Saving model config as json.")
+                import json
+                model_config_filename = os.path.join(args["output_dir"], "config.json")
+                with open(model_config_filename, "w+") as f: json.dump(cfg.to_dict(), f)
         else:
             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
                 cpu_state_dict = model.state_dict()
