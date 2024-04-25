@@ -30,6 +30,8 @@ from typing import List, Dict
 from pathlib import Path
 from glob import glob
 
+from datasets import load_dataset
+
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
 
@@ -1033,6 +1035,8 @@ def main(
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
 ):
+    if __name__ != '__main__':
+        return
 
     # Set world size
     if world_size == -1:
