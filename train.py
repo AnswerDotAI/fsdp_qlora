@@ -577,7 +577,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             model = AutoModelForCausalLM.from_config(cfg)
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
+                quant_config = BaseQuantizeConfig(nbits=int(args["n_bits"]), group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
                 model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
                                              compute_dtype=compute_dtype, del_orig=True, initialize=False, skip_modules=skip_modules)
@@ -1032,6 +1032,8 @@ def main(
     name: str = None, # For wandb logging
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
+    # ---- added by Umer
+    n_bits: int = 4, # passed to hqq
 ):
 
     # Set world size
