@@ -71,6 +71,7 @@ except ImportError:
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP, LlamaFlashAttention2
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP, MistralFlashAttention2
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, QWEN2_ATTENTION_CLASSES, Qwen2MLP, Qwen2FlashAttention2
+from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer, PHI3_ATTENTION_CLASSES, Phi3MLP, Phi3FlashAttention2, Phi3SdpaAttention
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -517,18 +518,19 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
         # Check module name is self_attn.
         return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), 
                                          *MISTRAL_ATTENTION_CLASSES.values(),
-                                         *QWEN2_ATTENTION_CLASSES.values())))
+                                         *QWEN2_ATTENTION_CLASSES.values(), 
+                                         *PHI3_ATTENTION_CLASSES.values())))
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, (LlamaMLP, MistralMLP, Qwen2MLP))
+        return isinstance(module, (LlamaMLP, MistralMLP, Qwen2MLP, Phi3MLP))
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
     mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
     transformer_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer),
+        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer, Phi3DecoderLayer),
     )
     if vanilla_policy:
         return transformer_wrap_policy
@@ -631,7 +633,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             cfg.rope_scaling["factor"] = rope_scaling_factor
             cfg._rope_scaling_validation()
         if args["rope_type"] != "dynamic":
-            cfg.max_position_embeddings = args["context_length"]
+            cfg.max_position_embeddings = max(cfg.max_position_embeddings, args["context_length"])
         
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             llama_pro_path = Path(args["llama_pro_path"])
@@ -649,18 +651,26 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             model = AutoModelForCausalLM.from_config(cfg)
             model_type = cfg.model_type
             # For some reason slower.
-            if attn_impl == "flash_attention_2":
+            if attn_impl == "flash_attention_2" and model_type != "phi3":
                 if model_type == "qwen2":
                     attn_cls = Qwen2FlashAttention2
                 elif model_type == "llama":
                     attn_cls = LlamaFlashAttention2
                 elif model_type == "mistral":
                     attn_cls = MistralFlashAttention2
-                for layer in model.model.layers: 
-                    m = getattr(layer, 'self_attn')
-                    setattr(layer, 'self_attn', attn_cls(m.config, m.layer_idx))
+                elif model_type == "phi3":
+                    # FIXME: Problem with cu_seq_lens
+                    attn_cls = Phi3FlashAttention2
                 model.config._attn_implementation = "flash_attention_2"
                 model.config._attn_implementation_internal = "flash_attention_2"
+            if model_type == "phi3":
+                model.config._attn_implementation = "sdpa"
+                model.config._attn_implementation_internal = "sdpa"
+                attn_cls = Phi3SdpaAttention
+                
+            for layer in model.model.layers: 
+                m = getattr(layer, 'self_attn')
+                setattr(layer, 'self_attn', attn_cls(m.config, m.layer_idx))
             
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
@@ -851,7 +861,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         )
 
-        check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer))
+        check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer, Phi3DecoderLayer))
         if rank == 0 or args['verbose']:
             print("Applying activation checkpointing", rank)
         apply_activation_checkpointing(
