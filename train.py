@@ -987,6 +987,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Clean up
     dist.destroy_process_group()
 
+def validate_args(args):
+    if args["n_bits"] != 4 and args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
+        raise ValueError(f"train_type={args['train_type']} doesn't support n_bits={args['n_bits']}. Either don't pass n_bits (to use default of 4) or use any of the hqq training types.")
 
 # Entry point, using fastcore's call_parse to parse args from command line and then calling fsdp_main
 @call_parse()
@@ -1043,6 +1046,7 @@ def main(
     # Get all args which will be passed to fsdp_main
     args = dict(locals())
     set_seed(args['seed'])
+    validate_args(args)
     if args['verbose']: print(args)
 
     # If lora_target_modules is 'all', set sensible defaults for llama + mistral type modules
