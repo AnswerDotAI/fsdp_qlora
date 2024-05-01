@@ -1032,7 +1032,6 @@ def main(
     name: str = None, # For wandb logging
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
-    # ---- added by Umer
     n_bits: int = 4, # passed to hqq
 ):
 
