@@ -1084,7 +1084,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 print("Saving model config as json.")
                 import json
                 model_config_filename = os.path.join(args["output_dir"], "config.json")
-                with open(model_config_filename, "w+") as f: json.dump(cfg.to_dict(), f)
+                config_dict = cfg.to_dict()
+                config_dict["lora_target_modules"] = args["lora_target_modules"]
+                config_dict["compute_dtype"] = str(compute_dtype).split(".")[-1]
+                with open(model_config_filename, "w+") as f: json.dump(config_dict, f)
         else:
             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
                 cpu_state_dict = model.state_dict()
@@ -1160,7 +1163,10 @@ def main(
     # If lora_target_modules is 'all', set sensible defaults for llama + mistral type modules
     # See peft.utils.constants -> TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING for the current defaults
     if lora_target_modules == "all":
-        args["lora_target_modules"] = ["k_proj", "q_proj", "v_proj", "up_proj", "down_proj", "gate_proj"]
+        if "phi-3" in model_name.lower():
+            args["lora_target_modules"] = ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
+        else:
+            args["lora_target_modules"] = ["q_proj", "k_proj","v_proj", "o_proj", "gate_proj",  "up_proj", "down_proj"]
     elif lora_target_modules.lower() == "default":
         args["lora_target_modules"] = None
 
