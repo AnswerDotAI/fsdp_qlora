@@ -988,7 +988,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     dist.destroy_process_group()
 
 def validate_args(args):
-    if args["n_bits"] != 4 and args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
+    if args["n_bits"] != 4 and args["train_type"] not in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
         raise ValueError(f"train_type={args['train_type']} doesn't support n_bits={args['n_bits']}. Either don't pass n_bits (to use default of 4) or use any of the hqq training types.")
 
 # Entry point, using fastcore's call_parse to parse args from command line and then calling fsdp_main
