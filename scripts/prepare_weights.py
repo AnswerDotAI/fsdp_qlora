@@ -53,7 +53,7 @@ def main(
     else:
         quantized_layers = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     # TODO: Get this info from saved model config if exists.
-    lora_layers = config_dict.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"])
+    lora_layers = config_dict.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     if "lora_target_modules" not in config_dict:
         logger.info(f"Using default lora layers: {lora_layers}")
     

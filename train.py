@@ -403,6 +403,23 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
         # train with 10k for starters. Then 100k.
         dataset = dataset.select(range(0,args['dataset_samples']))
+    elif args["dataset"] == "orca_math":
+        dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
+        # train with 10k for starters. Then 100k.
+        dataset = dataset.select(range(0,args['dataset_samples']))        
+    elif args["dataset"] == "orca_math_instruct":        
+        def convert_to_chat(example):
+            messages = [
+                {"role": "system", "content": "You are an AI assistant that excels in solving math problems."},
+                {"role": "user", "content": example['question']},
+            ]
+            input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            output_text = example['answer']
+            return {"input_text":input_text, "output_text":output_text}
+        dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
+        # train with 10k for starters. Then 100k.
+        dataset = dataset.select(range(0,args['dataset_samples']))     
+        dataset = dataset.map(convert_to_chat)
     elif is_local:
         dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])        
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
@@ -415,6 +432,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = InstructionDataset(dataset, tokenizer, style="qna")
     elif args["dataset"] == "orca_math":
         dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
+    elif args["dataset"] == "orca_math_instruct":
+        dataset = InstructionDataset(dataset, tokenizer, style="local")  
     elif is_local:
         dataset = InstructionDataset(dataset, tokenizer, style="local")
     else: # (w/ alpaca prompt formatting)
@@ -1099,6 +1118,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     print("Saving full model weights.")
                     save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
                     print("Done", rank)
+                    if args['train_type'] in ["qlora"]:
+                        # TODO: Save QLoRA config.
+                        config_dict["lora_target_modules"] = args["lora_target_modules"]
+                        config_dict["compute_dtype"] = str(compute_dtype).split(".")[-1]
+                        config_dict["lora_rank"] = args["lora_rank"]
+                        config_dict["n_bits"] = args["n_bits"]
+                        config_dict["blocksize"] = 64 # TODO: Add blocksize to args.
+                        with open(model_config_filename, "w+") as f: json.dump(config_dict, f)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
