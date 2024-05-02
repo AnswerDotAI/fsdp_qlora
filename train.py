@@ -1089,7 +1089,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 config_dict["lora_target_modules"] = args["lora_target_modules"]
                 config_dict["compute_dtype"] = str(compute_dtype).split(".")[-1]
                 config_dict["lora_rank"] = args["lora_rank"]
-                config_dict["nbits"] = args["nbits"]
+                config_dict["n_bits"] = args["n_bits"]
                 config_dict["blocksize"] = 64 # TODO: Add blocksize to args.
                 with open(model_config_filename, "w+") as f: json.dump(config_dict, f)
         else:
