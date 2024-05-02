@@ -577,7 +577,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             model = AutoModelForCausalLM.from_config(cfg)
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=4, group_size=64, quant_zero=True,
+                quant_config = BaseQuantizeConfig(nbits=int(args["n_bits"]), group_size=64, quant_zero=True,
                                                   quant_scale=True, offload_meta=True, view_as_float=True)
                 model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
                                              compute_dtype=compute_dtype, del_orig=True, initialize=False, skip_modules=skip_modules)
@@ -987,6 +987,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Clean up
     dist.destroy_process_group()
 
+def validate_args(args):
+    if args["n_bits"] != 4 and args["train_type"] not in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
+        raise ValueError(f"train_type={args['train_type']} doesn't support n_bits={args['n_bits']}. Either don't pass n_bits (to use default of 4) or use any of the hqq training types.")
 
 # Entry point, using fastcore's call_parse to parse args from command line and then calling fsdp_main
 @call_parse()
@@ -1032,6 +1035,7 @@ def main(
     name: str = None, # For wandb logging
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
+    n_bits: int = 4, # passed to hqq
 ):
 
     # Set world size
@@ -1042,6 +1046,7 @@ def main(
     # Get all args which will be passed to fsdp_main
     args = dict(locals())
     set_seed(args['seed'])
+    validate_args(args)
     if args['verbose']: print(args)
 
     # If lora_target_modules is 'all', set sensible defaults for llama + mistral type modules
