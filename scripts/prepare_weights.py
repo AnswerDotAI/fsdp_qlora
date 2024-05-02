@@ -128,18 +128,19 @@ def main(
                         w = bnb.functional.dequantize_4bit(param.data, param.quant_state).cpu()
                     elif quant_type == "hqq":
                             w = hqq_linear.dequantize_aten().cpu()
+                            
                     if any(l in n for l in lora_layers):
                         if args["infer_type"] in ["merged_bnb_lora", "merged_hqq_lora"]:
                             try: #HF lora
                                 n = "base_model.model." + n
                                 lora_a = weights[n.replace(".weight",".lora_A.default.weight")]
                                 lora_b = weights[n.replace(".weight",".lora_B.default.weight")]
+                                n = n.removeprefix("base_model.model.")
                             except: #custom lora
                                 lora_a = weights[n.replace(".weight",".lora_AB.0.weight")]
                                 lora_b = weights[n.replace(".weight",".lora_AB.1.weight")]
-                            merged_w = (w + lora_b @ lora_a) * lora_scale
+                            merged_w = w + (lora_b @ lora_a) * lora_scale
                             new_state_dict[n] = merged_w
-                            
                         elif args["infer_type"] in ["merged_hqq_dora", "merged_bnb_dora"]:
                             lora_a = weights[n.replace(".weight",".dora_layer.lora_A.weight")]
                             lora_b = weights[n.replace(".weight",".dora_layer.lora_B.weight")]
