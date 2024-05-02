@@ -1085,8 +1085,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 import json
                 model_config_filename = os.path.join(args["output_dir"], "config.json")
                 config_dict = cfg.to_dict()
+                # TODO: Save QLoRA config.
                 config_dict["lora_target_modules"] = args["lora_target_modules"]
                 config_dict["compute_dtype"] = str(compute_dtype).split(".")[-1]
+                config_dict["lora_rank"] = args["lora_rank"]
+                config_dict["nbits"] = args["nbits"]
+                config_dict["blocksize"] = 64 # TODO: Add blocksize to args.
                 with open(model_config_filename, "w+") as f: json.dump(config_dict, f)
         else:
             with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
