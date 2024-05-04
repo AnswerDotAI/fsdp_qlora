@@ -261,7 +261,12 @@ Benchmarking is always complicated: hardware varies between providers, different
 
 In this post we’ve tried to give recommendations for common use-cases which we hope will be useful in informing further experimentation, especially as FSDP+QLoRA support is added to more frameworks and the community explores this frontier further. We've also shown just how many more options there are for fine-tuning these large models now that we have these techniques at our disposal.
 
-Additional References:
+## Authors
+Jonathan Whitaker
+Benjamin Warner
+Kerem Turgutlu
+
+## Additional References:
 
 * [https://pytorch.org/docs/stable/fsdp.html](https://pytorch.org/docs/stable/fsdp.html)
 * [https://medium.com/pytorch/training-a-1-trillion-parameter-model-with-pytorch-fully-sharded-data-parallel-on-aws-3ac13aa96cff](https://medium.com/pytorch/training-a-1-trillion-parameter-model-with-pytorch-fully-sharded-data-parallel-on-aws-3ac13aa96cff)
