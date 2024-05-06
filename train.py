@@ -504,14 +504,27 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 # Optimizer
 def get_optimizer(model:nn.Module, args:Dict):
     """Returns an optimizer. We can add more options here if needed."""
+    
+    if args['lora_plus_lambda'] is not None:
+        lora_B_lr = args['lr'] * args['lora_plus_lambda']
+        params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
+        for name, param in model.named_parameters():
+            if any(pattern in name for pattern in ('lora_B', 'lora_AB.1')):
+                if args['verbose']: print(f"Adding {name} to lora_B_params")
+                params[1]['params'].append(param)
+            else:
+                params[0]['params'].append(param)
+    else:
+        params = model.parameters()
+        
     if args["optimizer"] == "adam":
-        return optim.Adam(model.parameters(), lr=args['lr'])
+        return optim.Adam(params, lr=args['lr'])
     elif args["optimizer"] == "sgd":
-        return optim.SGD(model.parameters(), lr=args['lr'])
+        return optim.SGD(params, lr=args['lr'])
     elif args["optimizer"] == "adadelta":
-        return optim.Adadelta(model.parameters(), lr=args['lr'])
+        return optim.Adadelta(params, lr=args['lr'])
     elif args["optimizer"] == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95),
+        return torch.optim.AdamW(params, lr=args['lr'], betas=(0.9,0.95),
                                  eps=1e-5, weight_decay=args['wd'])
     else:
         raise ValueError("Invalid optimizer")
@@ -1163,6 +1176,7 @@ def main(
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
+    lora_plus_lambda: int = None, # LoRA+ lambda for lora/qlora
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
