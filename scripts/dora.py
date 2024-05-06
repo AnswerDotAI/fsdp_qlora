@@ -5,16 +5,25 @@ import bitsandbytes as bnb
 # Wrapping policy requires modules, base_layer has no grad params, lora_A, lora_B, dora_scale have grad params.
 class DORALayer(nn.Module):
     "Same as LORA but also returnes weight norm. This will be wrapped as a single FSDP unit"
-    def __init__(self, in_features, out_features, lora_rank, device, dtype, *args, **kwargs):
+    def __init__(self, base_layer, lora_rank, device, dtype, *args, **kwargs):
         super().__init__()
-        # Init LoRA layers.
-        std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
-        lora_A_param = nn.Parameter(torch.randn(lora_rank, in_features).to(device=device, dtype=dtype)*std_dev)
-        self.lora_A = nn.Linear(in_features, lora_rank, bias=False, device=device, dtype=dtype)
-        setattr(self.lora_A, "weight", lora_A_param)
         
+        in_features, out_features = base_layer.in_features, base_layer.out_features
+        self.lora_A = nn.Linear(in_features, lora_rank, bias=False, device=device, dtype=dtype)
         self.lora_B = nn.Linear(lora_rank, out_features, bias=False, device=device, dtype=dtype)
-        self.lora_B.weight.data.zero_()
+        
+        if hasattr(base_layer, "lora_A") and hasattr(base_layer, "lora_B"):
+            # If base layer is already DORA, then copy the weights.
+            setattr(self.lora_A, "weight", nn.Parameter(base_layer.lora_A.T.to(device=device, dtype=dtype)))
+            setattr(self.lora_B, "weight", nn.Parameter(base_layer.lora_B.T.to(device=device, dtype=dtype)))
+            del base_layer.lora_A, base_layer.lora_B
+            torch.cuda.empty_cache()
+        else:
+            # Init LoRA layers.
+            std_dev = 1 / torch.sqrt(torch.tensor(lora_rank).float())
+            lora_A_param = nn.Parameter(torch.randn(lora_rank, in_features).to(device=device, dtype=dtype)*std_dev)
+            setattr(self.lora_A, "weight", lora_A_param)
+            self.lora_B.weight.data.zero_()
     
     def forward(self, x, frozen_weight):
         output = self.lora_B(self.lora_A(x))
@@ -47,7 +56,7 @@ class HQQDORA(nn.Module):
         torch.cuda.empty_cache()
         
         # Init DORA layers.
-        self.dora_layer = DORALayer(base_layer.in_features, base_layer.out_features, lora_rank, device, dtype, *args, **kwargs)
+        self.dora_layer = DORALayer(base_layer, lora_rank, device, dtype, *args, **kwargs)
 
     def forward(self, x, *args, **kwargs):
         result = self.base_layer(x, *args, **kwargs)

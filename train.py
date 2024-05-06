@@ -177,9 +177,20 @@ def setup_quantized_peft_meta_for_training(model:nn.Module):
             param.quant_state.to = param.quant_state._orig_to
             param.quant_state._orig_to = None
 
+def get_lowrank_tuple_torch_gpu(tensor, max_rank, eps=None):
+    t       = tensor.t().float()
+    u, s, v = torch.linalg.svd(t)
+    u, s, v = u[:,:max_rank], s[:max_rank], v[:max_rank, :]
+    us      = torch.matmul(u, torch.diag(s))
+    A, B    = (v.t(), us.t()) #t ~ AB
+    if(eps is not None):
+        A  = A.clamp(min=-eps, max=eps)
+        B   = B.clamp(min=-eps, max=eps)
+    return A.to(tensor.dtype), B.to(tensor.dtype)
+
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
                       skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb',
-                      is_dora:bool=False):
+                      is_dora:bool=False, loftq_init=False, lora_rank=None):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -227,11 +238,39 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                 if value_key == "weight":
                     # Like `Params4bit`, this workaround quantizes `HQQLinear`` per device so the quantization
                     # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
-                    submodule.linear_layer.to_empty(device=device)
-                    submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
-                    if is_dora:
-                        setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
-                    submodule.initialize()
+                    if loftq_init:
+                        # FIXME: RuntimeError: tensor does not have a device
+                        value = value.to(device=device, dtype=dtype)
+                        num_iters = 2
+                        submodule.linear_layer.to_empty(device=device)                    
+                        submodule.del_orig = False
+                        lora_A = torch.zeros(lora_rank, submodule.linear_layer.in_features, device=device, dtype=dtype) # rank x input
+                        lora_B = torch.zeros(submodule.linear_layer.out_features, lora_rank, device=device, dtype=dtype) # output x rank
+                        for _ in range(num_iters):
+                            W_hat = value - lora_B @ lora_A
+                            submodule.linear_layer.weight.data.copy_(W_hat)
+                            if hasattr(submodule, "W_q") and type(submodule.W_q) == torch.nn.parameter.Parameter:
+                                del submodule.W_q, submodule.meta
+                            submodule.quantize(submodule.linear_layer.weight.data, **submodule.quant_config)
+                            W_dq = submodule.dequantize()
+                            # error = (value - (W_dq + lora_B @ lora_A)).norm().item()
+                            # error = 1
+                            # if verbose and to_cpu: 
+                            #     print(f"LoftQ init error ({name}): {error}")
+                            lora_B, lora_A = get_lowrank_tuple_torch_gpu(value - W_dq, lora_rank, eps=None)
+                        del submodule.linear_layer
+                        setattr(submodule, "lora_A", lora_A.to("cpu"))
+                        setattr(submodule, "lora_B", lora_B.to("cpu"))
+                        if is_dora:
+                            column_norm_init = (W_dq + lora_B @ lora_A).norm(p=2, dim=1)
+                            setattr(submodule, "dora_scale", column_norm_init.to("cpu"))
+                        del W_dq; torch.cuda.empty_cache()
+                    else:
+                        submodule.linear_layer.to_empty(device=device)
+                        submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
+                        if is_dora:
+                            setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
+                        submodule.initialize()
 
                     if to_meta:
                         setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
@@ -510,9 +549,10 @@ def get_optimizer(model:nn.Module, args:Dict):
         params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
         for name, param in model.named_parameters():
             if any(pattern in name for pattern in ('lora_B', 'lora_AB.1')):
-                if args['verbose']: print(f"Adding {name} to lora_B_params")
+                if args['verbose']: print(f"Adding {name} to lora_B params")
                 params[1]['params'].append(param)
             else:
+                if args['verbose']: print(f"Adding {name} to params")
                 params[0]['params'].append(param)
     else:
         params = model.parameters()
@@ -655,6 +695,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
+        cfg.num_hidden_layers = 2
         skip_modules = ["lm_head"]
         if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
             if args["precision"] in ["bf16", "fp16"]:
@@ -738,9 +779,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             name, param = name_param
             load_and_quantize(model, name, param, **kwargs)
             
-        def load_bias_parallel(name_param, model, **kwargs):
-            name, param = name_param
-            load_bias(model, name, param, **kwargs)
+        # def load_bias_parallel(name_param, model, **kwargs):
+        #     name, param = name_param
+        #     load_bias(model, name, param, **kwargs)
 
         quant_method = "hqq" if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"] else "bnb"
         param_count = sum((p.numel() for n,p in model.named_parameters()))
@@ -760,11 +801,13 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
-                     verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
-            parallel(load_bias_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
-                     model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
-                     to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
-                     verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]))
+                     verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]), 
+                     loftq_init=args["loftq_init"], lora_rank=args["lora_rank"])
+            # parallel(load_bias_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
+            #          model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
+            #          to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
+            #          verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]), 
+            #          loftq_init=args["loftq_init"], lora_rank=args["lora_rank"])
             
         if rank == 0 and args["verbose"]:
             print(f"Loaded model weights in {time.time()-start:.3f} seconds")
@@ -864,7 +907,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
         backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
-        use_orig_params=False,
+        use_orig_params=args["lora_plus_lambda"] is not None,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
@@ -879,7 +922,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank)
         logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank)
 
-
+    if args["lora_plus_lambda"] is not None:
+        model = torch.compile(model)
+    
     # Synchronize at the start
     dist.barrier()
 
@@ -1177,6 +1222,7 @@ def main(
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
     lora_plus_lambda: int = None, # LoRA+ lambda for lora/qlora
+    loftq_init: bool_arg = False,
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
     apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
