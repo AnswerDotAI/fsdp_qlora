@@ -1,0 +1,15 @@
+python train.py \
+    --model_name meta-llama/Meta-Llama-3-8B \
+    --train_type hqq_dora \
+    --n_bits 4 \
+    --precision bf16 \
+    --dataset orca_math \
+    --dataset_samples 8 \
+    --batch_size 2 \
+    --context_length 512 \
+    --gradient_accumulation_steps 2 \
+    --use_gradient_checkpointing False \
+    --use_cpu_offload False \
+    --use_activation_cpu_offload False \
+    --save_model False \
+    --profiling_output /tmp/profile

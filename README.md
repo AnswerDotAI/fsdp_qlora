@@ -19,7 +19,7 @@ The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
 - Install bitsandbytes `pip install bitsandbytes>=0.43.0`
 - Run `huggingface-cli login` (to access Llama 2)
 - Optional Libraries:
-  - HQQ quantization: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`. Pin commit to `72b2b641aadc44a7ded6b243915f90df3b3be385` for FSDP compatibility, until `to_empty()` method is fixed. 
+  - HQQ quantization: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`.
   - Weights and Biases logging: `pip install wandb`
 - [Pytorch >= 2.2](https://pytorch.org/blog/pytorch2-2/) is recommended to make use of the native flash-attention 2 kernel.
 
