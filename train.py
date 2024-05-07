@@ -490,7 +490,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         
 
     # Collate function
-    def collate_fn(batch, with_attention_mask=False):
+    def collate_fn(batch, with_attention_mask=False, pad_to_nearest=True, pad_to_context_length=False):
         # To list of tensors
         input_ids = [torch.tensor(item['input_ids']) for item in batch]
         attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
@@ -502,6 +502,25 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         else:
             attention_masks = None
         labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
+        
+        if pad_to_nearest:
+            # might be useful for torch.compile dynamic kernels.
+            nearest_pad_dims = torch.tensor([128*i for i in range(1,args["context_length"]//128+1)])
+            nearest_pad_dim_idxs = torch.where(input_ids.shape[1] < nearest_pad_dims)[0]
+            if len(nearest_pad_dim_idxs) > 0:
+                nearest_pad_dim = nearest_pad_dims[nearest_pad_dim_idxs[0]]
+                num_pad = nearest_pad_dim - input_ids.shape[1]
+                input_ids = torch.nn.functional.pad(input_ids, pad=(0,num_pad), value=tokenizer.pad_token_id)
+                labels    = torch.nn.functional.pad(labels, pad=(0,num_pad), value=-100)
+                if with_attention_mask:
+                    attention_masks = torch.nn.functional.pad(attention_masks, pad=(0,num_pad), value=0)
+
+        if pad_to_context_length:
+            input_ids = torch.nn.functional.pad(input_ids, pad=(0,args["context_length"]-input_ids.shape[1]), value=tokenizer.pad_token_id)
+            labels    = torch.nn.functional.pad(labels, pad=(0,args["context_length"]-labels.shape[1]), value=-100)
+            if with_attention_mask:
+                attention_masks = torch.nn.functional.pad(attention_masks, pad=(0,args["context_length"]-attention_masks.shape[1]), value=0)
+                
         # Return dict
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
 
@@ -705,7 +724,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
-        cfg.num_hidden_layers = 2
+        # cfg.num_hidden_layers = 2
         skip_modules = ["lm_head"]
         if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
             if args["precision"] in ["bf16", "fp16"]:
@@ -933,8 +952,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank)
         logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank)
 
+    torch_compiled = False
     if args["lora_plus_lambda"] is not None:
-        model = torch.compile(model)
+        model = torch.compile(model, dynamic=True)
+        torch_compiled = True
     
     # Synchronize at the start
     dist.barrier()
@@ -995,6 +1016,16 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
+        
+    # warm up to compile different sizes.
+    model.train()
+    if torch_compiled:
+        nearest_pad_dims = torch.tensor([128*i for i in range(1,args["context_length"]//128+1)])
+        for size in nearest_pad_dims:
+            model(torch.zeros((args['batch_size'], size)).to(device=local_rank, dtype=torch.long), 
+                    labels=torch.zeros((args['batch_size'], size)).to(device=local_rank, dtype=torch.long), 
+                    attention_mask=None)
+            
     memory_stats = []
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
@@ -1003,9 +1034,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     torch.cuda.reset_peak_memory_stats(local_rank)
     for epoch in range(args['num_epochs']):
         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
-        model.train()
         ddp_loss = torch.zeros(2).to(local_rank)
-
+        
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
