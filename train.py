@@ -190,7 +190,7 @@ def get_lowrank_tuple_torch_gpu(tensor, max_rank, eps=None):
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
                       skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, quant_method:str='bnb',
-                      is_dora:bool=False, loftq_init=False, lora_rank=None):
+                      is_dora:bool=False, loftq_init=False, lora_rank=None, save_model_output_dir=None):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
@@ -240,6 +240,7 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                     # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
                     if loftq_init:
                         # FIXME: RuntimeError: tensor does not have a device
+                        # TODO: Weight saving.
                         value = value.to(device=device, dtype=dtype)
                         num_iters = 2
                         submodule.linear_layer.to_empty(device=device)                    
@@ -253,14 +254,23 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                                 del submodule.W_q, submodule.meta
                             submodule.quantize(submodule.linear_layer.weight.data, **submodule.quant_config)
                             W_dq = submodule.dequantize()
+                            lora_B, lora_A = get_lowrank_tuple_torch_gpu(value - W_dq, lora_rank, eps=None)
                             # error = (value - (W_dq + lora_B @ lora_A)).norm().item()
                             # error = 1
                             # if verbose and to_cpu: 
-                            #     print(f"LoftQ init error ({name}): {error}")
-                            lora_B, lora_A = get_lowrank_tuple_torch_gpu(value - W_dq, lora_rank, eps=None)
+                            #     print(f"LoftQ init error ({name}): {error}")    
+                        
+                        # Save weights. LoftQ init changes the base weights so we need to save the final Wq and meta.
+                        # This should be deterministic and alternatively can be computed again if not saved?
+                        if save_model_output_dir is not None and to_cpu:
+                            save_dir = os.path.join(save_model_output_dir, "hqq_loftq_init_weights")
+                            os.makedirs(save_dir, exist_ok=True)
+                            torch.save({"W_q":submodule.W_q, "meta":submodule.meta}, os.path.join(save_dir, f"{name}.pt"))
+                        
+                                                
                         del submodule.linear_layer
-                        setattr(submodule, "lora_A", lora_A.to("cpu"))
-                        setattr(submodule, "lora_B", lora_B.to("cpu"))
+                        setattr(submodule, "lora_A", lora_A.to("cpu")); print(f"Lora A: {lora_A.shape}")
+                        setattr(submodule, "lora_B", lora_B.to("cpu")); print(f"Lora B: {lora_B.shape}")
                         if is_dora:
                             column_norm_init = (W_dq + lora_B @ lora_A).norm(p=2, dim=1)
                             setattr(submodule, "dora_scale", column_norm_init.to("cpu"))
@@ -802,7 +812,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                      model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
                      to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),
                      verbose=args["verbose"], quant_method=quant_method, is_dora=(args["train_type"] in ["hqq_dora", "bnb_dora"]), 
-                     loftq_init=args["loftq_init"], lora_rank=args["lora_rank"])
+                     loftq_init=args["loftq_init"], lora_rank=args["lora_rank"], 
+                     save_model_output_dir=args["output_dir"] if args["save_model"] else None)
             # parallel(load_bias_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
             #          model=model, dtype=torch_dtype, device=local_rank, skip_names=load_param_skip_names,
             #          to_cpu=(args["low_memory"] and rank==0), to_meta=(args["low_memory"] and rank!=0),

@@ -2,7 +2,7 @@
 cd ../../ && python train.py \
 --train_type hqq_dora \
 --loftq_init true \
---model_name meta-llama/Llama-2-7b-hf \
+--model_name meta-llama/Meta-Llama-3-8B \
 --dataset orca_math \
 --dataset_samples 100 \
 --batch_size 4 \
@@ -16,4 +16,5 @@ cd ../../ && python train.py \
 --log_to stdout \
 --verbose true \
 --project_name "fsdp-quantized-ft-exps" \
---save_model false 
+--save_model true \
+--output_dir /workspace/models/tets-loftq-hqq-dummy

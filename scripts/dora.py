@@ -13,9 +13,9 @@ class DORALayer(nn.Module):
         self.lora_B = nn.Linear(lora_rank, out_features, bias=False, device=device, dtype=dtype)
         
         if hasattr(base_layer, "lora_A") and hasattr(base_layer, "lora_B"):
-            # If base layer is already DORA, then copy the weights.
-            setattr(self.lora_A, "weight", nn.Parameter(base_layer.lora_A.T.to(device=device, dtype=dtype)))
-            setattr(self.lora_B, "weight", nn.Parameter(base_layer.lora_B.T.to(device=device, dtype=dtype)))
+            # If base layer has custom init for lora layers, then copy the weights.
+            setattr(self.lora_A, "weight", nn.Parameter(base_layer.lora_A.to(device=device, dtype=dtype)))
+            setattr(self.lora_B, "weight", nn.Parameter(base_layer.lora_B.to(device=device, dtype=dtype)))
             del base_layer.lora_A, base_layer.lora_B
             torch.cuda.empty_cache()
         else:
