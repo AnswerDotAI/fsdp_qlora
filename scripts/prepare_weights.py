@@ -95,7 +95,7 @@ def main(
                     
                 elif quant_type == "hqq":
                     quant_config = BaseQuantizeConfig(nbits=nbits, group_size=blocksize, quant_zero=True,
-                                    quant_scale=True, offload_meta=True, view_as_float=True)
+                                    quant_scale=True, offload_meta=True, view_as_float=True, axis=1)
                     m = torch.nn.Linear(output_size, input_size)
                     m.weight.data.copy_(p)
                     hqq_linear = HQQLinear(linear_layer=m, quant_config=quant_config, compute_dtype=dtype, device="cuda")
@@ -121,7 +121,8 @@ def main(
                             if quant_type == "bnb":
                                 w = bnb.functional.dequantize_4bit(param.data, param.quant_state).cpu()
                             elif quant_type == "hqq":
-                                w = hqq_linear.dequantize_aten().cpu()
+                                # w = hqq_linear.dequantize_aten().cpu()
+                                w = hqq_linear.dequantize().cpu()
                             rescale = m / (w + lora_b @ lora_a).norm(p=2, dim=1).detach()
                             new_state_dict[n.replace(".weight", ".lora_A")] = lora_a
                             new_state_dict[n.replace(".weight", ".lora_B")] = lora_b
@@ -135,7 +136,8 @@ def main(
                     if quant_type == "bnb":
                         w = bnb.functional.dequantize_4bit(param.data, param.quant_state).cpu()
                     elif quant_type == "hqq":
-                            w = hqq_linear.dequantize_aten().cpu()
+                            # w = hqq_linear.dequantize_aten().cpu()
+                            w = hqq_linear.dequantize().cpu()
                             
                     if any(l in n for l in lora_layers):
                         if args["infer_type"] in ["merged_bnb_lora", "merged_hqq_lora"]:

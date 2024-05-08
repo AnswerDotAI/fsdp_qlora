@@ -223,53 +223,73 @@
 # --output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-plus-loftq-init
 
 
-# 10k qlora+ instruct, lora_plus_lambda=16 (too high)
-cd /workspace/git/fsdp_qlora && python train.py \
---lora_plus_lambda 8 \
---train_type hqq_lora \
---model_name meta-llama/Meta-Llama-3-8B-Instruct \
---dataset orca_math_instruct \
---dataset_samples 10000 \
---batch_size 4 \
---context_length 2048 \
---gradient_accumulation_steps 2 \
---sharding_strategy full_shard \
---use_gradient_checkpointing true \
---reentrant_checkpointing true \
---use_cpu_offload false \
---use_activation_cpu_offload false \
---log_to wandb \
---verbose true \
---project_name "fsdp-quantized-ft-exps" \
---save_model true \
---output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-plus
+# # 10k qlora+ instruct, lora_plus_lambda=16 (too high)
+# cd /workspace/git/fsdp_qlora && python train.py \
+# --lora_plus_lambda 8 \
+# --train_type hqq_lora \
+# --model_name meta-llama/Meta-Llama-3-8B-Instruct \
+# --dataset orca_math_instruct \
+# --dataset_samples 10000 \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-plus
 
-# 10k qlora (loftq init) instruct
-cd /workspace/git/fsdp_qlora && python train.py \
---loftq_init true \
---train_type hqq_lora \
---model_name meta-llama/Meta-Llama-3-8B-Instruct \
---dataset orca_math_instruct \
---dataset_samples 10000 \
---batch_size 4 \
---context_length 2048 \
---gradient_accumulation_steps 2 \
---sharding_strategy full_shard \
---use_gradient_checkpointing true \
---reentrant_checkpointing true \
---use_cpu_offload false \
---use_activation_cpu_offload false \
---log_to wandb \
---verbose true \
---project_name "fsdp-quantized-ft-exps" \
---save_model true \
---output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-loftq-init
+# # 10k qlora (loftq init) instruct
+# cd /workspace/git/fsdp_qlora && python train.py \
+# --loftq_init true \
+# --train_type hqq_lora \
+# --model_name meta-llama/Meta-Llama-3-8B-Instruct \
+# --dataset orca_math_instruct \
+# --dataset_samples 10000 \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-loftq-init
 
-# 10k qlora+ (loftq init) instruct
+# # 10k qlora+ (loftq init) instruct
+# cd /workspace/git/fsdp_qlora && python train.py \
+# --lora_plus_lambda 8 \
+# --loftq_init true \
+# --train_type hqq_lora \
+# --model_name meta-llama/Meta-Llama-3-8B-Instruct \
+# --dataset orca_math_instruct \
+# --dataset_samples 10000 \
+# --batch_size 4 \
+# --context_length 2048 \
+# --gradient_accumulation_steps 2 \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing true \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to wandb \
+# --verbose true \
+# --project_name "fsdp-quantized-ft-exps" \
+# --save_model true \
+# --output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-plus-loftq-init
+
+# 10k qdora instruct (hqq axis=1 for torchao kernel compat)
 cd /workspace/git/fsdp_qlora && python train.py \
---lora_plus_lambda 8 \
---loftq_init true \
---train_type hqq_lora \
+--train_type hqq_dora \
 --model_name meta-llama/Meta-Llama-3-8B-Instruct \
 --dataset orca_math_instruct \
 --dataset_samples 10000 \
@@ -285,4 +305,4 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --verbose true \
 --project_name "fsdp-quantized-ft-exps" \
 --save_model true \
---output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-plus-loftq-init
+--output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1

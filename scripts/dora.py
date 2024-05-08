@@ -73,7 +73,8 @@ class HQQDORA(nn.Module):
             x = x.to(self.dora_layer.lora_A.weight.dtype)
 
         # m * (W + AB / ||W + AB||) @ X == m * ((W @ X + AB @ X) / ||W + AB||)
-        output, column_norm = self.dora_layer(x, self.base_layer.dequantize_aten())
+        # output, column_norm = self.dora_layer(x, self.base_layer.dequantize_aten())
+        output, column_norm = self.dora_layer(x, self.base_layer.dequantize())
         if requires_conversion:
             output = output.to(expected_dtype)
         
