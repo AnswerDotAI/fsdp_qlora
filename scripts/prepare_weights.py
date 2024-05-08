@@ -5,7 +5,7 @@ NOTE: Highly experimental as vLLM integration might change. For now it is safer 
 """
 
 from pathlib import Path
-import os, json
+import os, json, shutil
 from safetensors.torch import save_file
 import copy
 from tqdm import tqdm
@@ -31,6 +31,7 @@ def main(
     infer_type: Param("", choices=["full_post_quant", "bnb_dora", "merged_bnb_lora", "merged_hqq_lora", "merged_bnb_dora", "merged_hqq_dora"]) = "full_post_quant", # Which merge strategy to use for inference.
     model_weights_dir: str = None, # Used for full post quantization.
     lora_or_dora_filename: str = None, # Used for lora/dora inference.
+    loftq_init_dir: str = None, # Used for loftq init weights.
     config_filename: str = None, # Used to get config, might have been saved after training.
     model_name: str = "meta-llama/Llama-2-7b-hf", 
     save_dir: str = "/workspace/models/llama-7b-orca-math-100k-full-quantized",
@@ -64,6 +65,8 @@ def main(
         idx = hub.cached_file(MODEL_NAME, SAFE_WEIGHTS_INDEX_NAME)
         pretrained_files, _ = hub.get_checkpoint_shard_files(MODEL_NAME, idx)
         weights = safetensors.torch.load_file(lora_or_dora_filename)
+        # This is temp, fixed in train.py.
+        weights = {k.removeprefix("_orig_mod."):v for k,v in weights.items()}
     
     # Prepare new weights for inference.
     # TODO: Read these to saved config file.
@@ -96,6 +99,11 @@ def main(
                     m = torch.nn.Linear(output_size, input_size)
                     m.weight.data.copy_(p)
                     hqq_linear = HQQLinear(linear_layer=m, quant_config=quant_config, compute_dtype=dtype, device="cuda")
+                    
+                    if loftq_init_dir is not None:
+                        loftq_init = torch.load(os.path.join(loftq_init_dir, f"{n}.pt"))
+                        hqq_linear.W_q = loftq_init['W_q']
+                        hqq_linear.meta = loftq_init['meta']
                 
                 if args["infer_type"] in ["full_post_quant", "bnb_dora", "hqq_dora"]:
                     # reshape for tensor parallelism
@@ -183,3 +191,7 @@ def main(
         model_config = AutoConfig.from_pretrained(MODEL_NAME)
         model_config_filename = save_dir/"config.json"
         with open(model_config_filename, "w+") as f: json.dump(model_config.to_dict(), f)
+    else:
+        # copy existing config file
+        model_config_filename = save_dir/"config.json"
+        shutil.copy(args["config_filename"], model_config_filename)        

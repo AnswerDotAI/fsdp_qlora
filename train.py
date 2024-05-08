@@ -256,7 +256,6 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
                             W_dq = submodule.dequantize()
                             lora_B, lora_A = get_lowrank_tuple_torch_gpu(value - W_dq, lora_rank, eps=None)
                             # error = (value - (W_dq + lora_B @ lora_A)).norm().item()
-                            # error = 1
                             # if verbose and to_cpu: 
                             #     print(f"LoftQ init error ({name}): {error}")    
                         
@@ -1189,7 +1188,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             for prefix, module in trainable_fsdp_modules:
                 prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                                 .replace("_checkpoint_wrapped_module.", "")
-                                .replace("_offload_wrapped_module.", ""))
+                                .replace("_offload_wrapped_module.", "")
+                                .replace("_orig_mod.", ""))
                 if args['verbose']: print(f"Saving {prefix}")
                 with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
                     cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}

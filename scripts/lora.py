@@ -11,6 +11,13 @@ class LORA(nn.Module):
         lora_B = nn.Linear(lora_rank, base_layer.out_features, bias=False, device=device, dtype=dtype)
         lora_B.weight.data.zero_()
 
+        if hasattr(base_layer, "lora_A") and hasattr(base_layer, "lora_B"):
+            # If base layer has custom init for lora layers, then copy the weights.
+            setattr(lora_A, "weight", nn.Parameter(base_layer.lora_A.to(device=device, dtype=dtype)))
+            setattr(lora_B, "weight", nn.Parameter(base_layer.lora_B.to(device=device, dtype=dtype)))
+            del base_layer.lora_A, base_layer.lora_B
+            torch.cuda.empty_cache()
+
         self.lora_AB = nn.Sequential(lora_A, lora_B)
 
         self.lora_alpha = lora_alpha

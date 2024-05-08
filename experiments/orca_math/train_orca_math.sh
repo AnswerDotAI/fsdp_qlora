@@ -158,9 +158,9 @@
 # --save_model true \
 # --output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-bnb-qdora
 
-# 10k qdora+ instruct
+# 10k qdora+ instruct, lora_plus_lambda=16 (too high)
 cd /workspace/git/fsdp_qlora && python train.py \
---lora_plus_lambda 16 \
+--lora_plus_lambda 8 \
 --train_type hqq_dora \
 --model_name meta-llama/Meta-Llama-3-8B-Instruct \
 --dataset orca_math_instruct \
@@ -202,7 +202,7 @@ cd /workspace/git/fsdp_qlora && python train.py \
 
 # 10k qdora+ (loftq init) instruct
 cd /workspace/git/fsdp_qlora && python train.py \
---lora_plus_lambda 16 \
+--lora_plus_lambda 8 \
 --loftq_init true \
 --train_type hqq_dora \
 --model_name meta-llama/Meta-Llama-3-8B-Instruct \
