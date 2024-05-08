@@ -139,11 +139,11 @@ def main(
                             
                     if any(l in n for l in lora_layers):
                         if args["infer_type"] in ["merged_bnb_lora", "merged_hqq_lora"]:
+                            # import pdb; pdb.set_trace()
                             try: #HF lora
-                                n = "base_model.model." + n
-                                lora_a = weights[n.replace(".weight",".lora_A.default.weight")]
-                                lora_b = weights[n.replace(".weight",".lora_B.default.weight")]
-                                n = n.removeprefix("base_model.model.")
+                                n_tmp = "base_model.model." + n
+                                lora_a = weights[n_tmp.replace(".weight",".lora_A.default.weight")]
+                                lora_b = weights[n_tmp.replace(".weight",".lora_B.default.weight")]
                             except: #custom lora
                                 lora_a = weights[n.replace(".weight",".lora_AB.0.weight")]
                                 lora_b = weights[n.replace(".weight",".lora_AB.1.weight")]
