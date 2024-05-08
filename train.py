@@ -29,6 +29,7 @@ from tqdm.auto import tqdm
 from typing import List, Dict
 from pathlib import Path
 from glob import glob
+from packaging.version import parse
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
@@ -140,7 +141,7 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module, quant_config:d
     for name, module in model.named_children():
         if name in skip_modules:
             continue
-        
+
         if len(list(module.children())) > 0:
             replace_linear(module, linear_replacement, quant_config, skip_modules, **kwargs)
 
@@ -290,7 +291,7 @@ class InstructionDataset(Dataset):
             prompt_template = "###Question:\n{question}\n###Answer:\n"
             sample = self.dataset[index]
             prompt = prompt_template.format_map(sample)
-            example = prompt + sample['answer']           
+            example = prompt + sample['answer']
         else: # Alpaca
             ann = self.dataset[index]
             if ann.get("input", "") == "":
@@ -347,7 +348,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
         # train with 10k for starters. Then 100k.
         dataset = dataset.select(range(0,args['dataset_samples']))
-        
+
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
 
@@ -424,15 +425,15 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 # Optimizer
 def get_optimizer(model:nn.Module, args:Dict):
     """Returns an optimizer. We can add more options here if needed."""
-    if args["optimizer"] == "adam":
-        return optim.Adam(model.parameters(), lr=args['lr'])
+    if args["optimizer"] in ["adam", "fused_adam"]:
+        return optim.Adam(model.parameters(), lr=args['lr'], fused=args["optimizer"]=="fused_adam")
     elif args["optimizer"] == "sgd":
         return optim.SGD(model.parameters(), lr=args['lr'])
     elif args["optimizer"] == "adadelta":
         return optim.Adadelta(model.parameters(), lr=args['lr'])
-    elif args["optimizer"] == "adamw":
+    elif args["optimizer"] in ["adamw", "fused_adamw"]:
         return torch.optim.AdamW(model.parameters(), lr=args['lr'], betas=(0.9,0.95),
-                                 eps=1e-5, weight_decay=args['wd'])
+                                 eps=1e-5, weight_decay=args['wd'], fused=args["optimizer"]=="fused_adamw")
     else:
         raise ValueError("Invalid optimizer")
 
@@ -470,7 +471,7 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
     )
     if vanilla_policy:
         return transformer_wrap_policy
-    
+
     policies=[lambda_policy, transformer_wrap_policy]
     if custom_policy:
         policies.extend([self_attn_policy, mlp_policy])
@@ -490,6 +491,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(local_rank)
+    if args["use_cpu_offload"]:
+         torch.set_num_threads(os.cpu_count()//(min(world_size, torch.cuda.device_count())))
 
     # Start logging
     logger = Logger(args, log_to=args["log_to"], project_name=args["project_name"],
@@ -560,7 +563,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
-        
+
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             llama_pro_path = Path(args["llama_pro_path"])
             num_original_layers, num_expanded_layers = llama_pro_path.name.split("blk_exp-")[1].split("-")
@@ -695,14 +698,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     print("Trainable Llama-Pro layer", n)
             else:
                 p.requires_grad = False
-                
+
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank)
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
 
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"], 
+    my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"],
                                               vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
 
     if rank == 0 or args['verbose']:
@@ -1024,7 +1027,7 @@ def main(
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
     profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
-    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta"]) = "adamw", # Optimizer
+    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta", "fused_adam", "fused_adamw"]) = "adamw", # Optimizer. PyTorch 2.4 nightly adds CPU fused Adam/AdamW which should improve offload training speed.
     lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
     loading_workers: int = -1, # Number of layers to load and quantize in parallel per GPU. Default of -1 uses heuristics to set worker count.
     log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
@@ -1067,6 +1070,9 @@ def main(
 
     if args["train_type"] in ["hqq_lora"] and HQQLinear is None:
         raise ValueError("HQQ is required to train with `train_type='hqq_lora'`. See ReadMe for details.")
+
+    if args["optimizer"] in ["fused_adam", "fused_adamw"] and args["use_cpu_offload"] and parse(torch.__version__) < parse("2.4dev"):
+        raise ValueError(f"Optimizer '{args['optimizer']}' with `use_cpu_offload=True` requires at least PyTorch 2.4 Nightly with fused Adam/AdamW CPU support.")
 
     # Run
     mp.spawn(fsdp_main,
