@@ -576,7 +576,7 @@ def get_optimizer(model:nn.Module, args:Dict):
         lora_B_lr = args['lr'] * args['lora_plus_lambda']
         params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
         for name, param in model.named_parameters():
-            if any(pattern in name for pattern in ('lora_B', 'lora_AB.1')):
+            if any(pattern in name for pattern in ('lora_B', 'lora_AB._fsdp_wrapped_module.1')):
                 if args['verbose']: print(f"Adding {name} to lora_B params")
                 params[1]['params'].append(param)
             else:
