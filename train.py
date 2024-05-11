@@ -1040,6 +1040,8 @@ def main(
     entity: str = None, # For wandb logging
     n_bits: int = 4, # passed to hqq
 ):
+    if __name__ != '__main__':
+        return
 
     # Set world size
     if world_size == -1:
