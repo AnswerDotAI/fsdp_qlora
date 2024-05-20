@@ -1010,39 +1010,39 @@ def validate_args(args):
 # Main entry point, validate and package arguments, then call fsdp_main. Scripts importing train.py as an import can invoke this function (invoking main() directly leads to call_parse() overwriting arguments).
 def fsdp_qlora(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: str = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     llama_pro_path: str = None, # Path to the quantized llama pro model
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     dataset_samples: int = 512, # Number of samples in an epoch if using "alpaca_sample" or "dummy" dataset
-    sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
-    use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
-    reentrant_checkpointing: bool_arg = False, # Use re-entrant autograd activation checkpointing. Setting to True can use less GPU memory with BNB QLoRA
-    use_cpu_offload: bool_arg = True, # Use FSDP's CPU offloading
-    use_activation_cpu_offload: bool_arg = False, # Use FSDP's activation CPU offloading
-    low_memory: bool_arg = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
-    no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
-    precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
+    sharding_strategy: str = "full_shard", # Sharding strategy for FSDP
+    use_gradient_checkpointing: bool = True, # Use FSDP's activation checkpointing
+    reentrant_checkpointing: bool = False, # Use re-entrant autograd activation checkpointing. Setting to True can use less GPU memory with BNB QLoRA
+    use_cpu_offload: bool = True, # Use FSDP's CPU offloading
+    use_activation_cpu_offload: bool = False, # Use FSDP's activation CPU offloading
+    low_memory: bool = True, # Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
+    no_sync: bool = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
+    precision: str = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    save_model: bool_arg = False, # Save the resulting model
+    save_model: bool = False, # Save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
-    lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
-    verbose: bool_arg = False, # Whether to print extra info for debugging
+    lora_target_modules: str = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
+    verbose: bool = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
-    apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
+    apply_gradient_clipping: bool = False, # Apply gradient norm clipping
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
-    profile_memory: bool_arg = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
-    optimizer: Param("", choices=["adamw", "adam", "sgd", "adadelta", "fused_adam", "fused_adamw"]) = "adamw", # Optimizer. PyTorch 2.4 nightly adds CPU fused Adam/AdamW which should improve offload training speed.
-    lr_scheduler: Param("", choices=["constant", "linear", "cosine"]) = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+    profile_memory: bool = False, # Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
+    optimizer: str = "adamw", # Optimizer. PyTorch 2.4 nightly adds CPU fused Adam/AdamW which should improve offload training speed.
+    lr_scheduler: str = "constant", # Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
     loading_workers: int = -1, # Number of layers to load and quantize in parallel per GPU. Default of -1 uses heuristics to set worker count.
-    log_to: Param("", choices=["tqdm", "wandb", "stdout"]) = "tqdm", # Where to log output
+    log_to: str = "tqdm", # Where to log output
     master_addr: str = "localhost", # For distributed training
     master_port: str = "12355", # For distributed training, must be the same for all processes
     seed: int = 42, # Random seed
@@ -1053,7 +1053,54 @@ def fsdp_qlora(
     n_bits: int = 4, # passed to hqq
     profiling_output: str = None, # Output file for profiling
     ):
+    """
+    Train a model with FSDP and QLoRA/QDoRA.
 
+    Args:
+        world_size: Number of GPUs to use. -1 = all available GPUs.
+        train_type: "full", "lora", "qlora", or "custom_qlora"
+        llama_pro_path: Path to the quantized llama pro model
+        batch_size: Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
+        context_length: Max length of input sequence (in tokens)
+        gradient_accumulation_steps: How many steps to accumulate gradients over (increases effective batch size)
+        num_epochs: How many epochs of training to do
+        dataset: alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+        dataset_samples: Number of samples in an epoch if using "alpaca_sample" or "dummy" dataset
+        sharding_strategy: Sharding strategy for FSDP
+        use_gradient_checkpointing: Use FSDP's activation checkpointing
+        reentrant_checkpointing: Use re-entrant autograd activation checkpointing. Setting to True can use less GPU memory with BNB QLoRA
+        use_cpu_offload: Use FSDP's CPU offloading
+        use_activation_cpu_offload: Use FSDP's activation CPU offloading
+        low_memory: Load one copy of the model into CPU memory before sharding with FSDP. For QLoRA, quantizes each layer individually on GPU before placing on CPU.
+        no_sync: Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
+        precision: Training precision. autocast precisions use mixed precision
+        model_name: Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        save_model: Save the resulting model
+        output_dir: Output directory to save the final model to
+        lora_rank: LoRA rank for lora/qlora
+        lora_alpha: LoRA alpha for lora/qlora
+        lora_dropout: LoRA dropout for lora/qlora
+        lora_target_modules: If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
+        verbose: Whether to print extra info for debugging
+        lr: Learning rate
+        apply_gradient_clipping: Apply gradient norm clipping
+        grad_norm: Gradient norm clipping
+        wd: Weight decay
+        profile_memory: Profile memory usage for the first few batches. Keep false for training. May increase memory usage.
+        optimizer: Optimizer. PyTorch 2.4 nightly adds CPU fused Adam/AdamW which should improve offload training speed.
+        lr_scheduler: Learning Rate Scheduler. linear and cosine warm up for 10% of training steps.
+        loading_workers: Number of layers to load and quantize in parallel per GPU. Default of -1 uses heuristics to set worker count.
+        log_to: Where to log output
+        master_addr: For distributed training
+        master_port: For distributed training, must be the same for all processes
+        seed: Random seed
+        project_name: For wandb logging
+        name: For wandb logging
+        group: For wandb logging
+        entity: For wandb logging
+        n_bits: passed to hqq
+        profiling_output: Output file for profiling
+    """
 
     # Set world size
     if world_size == -1:
