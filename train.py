@@ -488,7 +488,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         profile_memory = args["export_memory_timeline"]
         export_trace = args["export_trace"]
         export_memory_timeline = args["export_memory_timeline"]
-        with_stack = args["with_stack"] or args["export_memory_timeline"]#False if args["export_trace"] else (args["with_stack"] or args["export_memory_timeline"]) #See https://github.com/pytorch/pytorch/issues/121219
+        with_stack = args["with_stack"] or args["export_memory_timeline"]
         with_shapes = args["with_shapes"] or export_memory_timeline
         model_name = args["model_name"].split("/")[-1]
         train_type = args["train_type"]

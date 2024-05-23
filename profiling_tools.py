@@ -49,6 +49,10 @@ def trace_handler(
             print(key_avgs)
             
 class FakeContext:
+    """
+    Fake context when not using profiler with profiling script.
+    
+    """
     def __enter__(self):
         return self
     def __exit__(self, *args, **kwargs):
