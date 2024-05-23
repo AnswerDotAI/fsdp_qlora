@@ -86,6 +86,7 @@ except ImportError:
 sys.path.append("./scripts")
 from lora import LORA
 from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
+from profiling_tools import trace_handler, FakeContext
 
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
@@ -481,14 +482,41 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
 
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
-    profiler_context = profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        with_stack=True,
-        use_cuda=True,
-        record_shapes=False,
-        experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True) # https://github.com/pytorch/pytorch/issues/100253
-        ) if args["profiling_output"] else nullcontext()
-
+    #Profiler args
+    if args["profile"]:
+        #Profiler args
+        with_stack = False if args["export_trace"] else args["with_stack"] #See https://github.com/pytorch/pytorch/issues/121219
+        with_shapes = args["with_shapes"]
+        profile_memory = args["export_memory_timeline"]
+        export_trace = args["export_trace"]
+        export_memory_timeline = args["export_memory_timeline"]
+        model_name = args["model_name"].split("/")[-1]
+        train_type = args["train_type"]
+        prefix = f"{model_name}_{train_type}"
+        output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}-{local_rank}"
+        schedule = torch.profiler.schedule(wait=args["wait_steps"], warmup=args["warmup_steps"], active=args["active_steps"], repeat=1)
+        callback = functools.partial(trace_handler, 
+                                    export_trace=export_trace, 
+                                    export_memory_timeline=export_memory_timeline, 
+                                    with_stack=with_stack, 
+                                    group_by_stack=5 if with_stack else 0,
+                                    prefix=prefix,
+                                    out_dir=output_dir,
+                                    rank=local_rank,
+                                    verbose=args["verbose"])
+        #Instantiate profiler
+        profiler_context = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=with_stack,
+            profile_memory=profile_memory,
+            use_cuda=True,
+            record_shapes=with_shapes,
+            schedule=schedule,
+            on_trace_ready=callback,
+            experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True) if with_stack else None, # https://github.com/pytorch/pytorch/issues/100253
+            )
+    else:
+        profiler_context = FakeContext()
     with profiler_context as prof:
         # Setup and initialize the process group
         os.environ['MASTER_ADDR'] = args["master_addr"]
@@ -826,6 +854,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             ddp_loss = torch.zeros(2).to(local_rank)
 
             for batch_idx, batch in enumerate(dataloader):
+                
                 accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
                 # Prevent gradient syncing until update step if using no_sync option.
@@ -925,6 +954,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         if args["log_to"] == 'wandb':
                             logger.log({"loss": log_loss, "lr": log_lr}, rank)
                     ddp_loss = torch.zeros(2).to(local_rank)
+                
+                if rank == 0:
+                    print(f"Batch idx {batch_idx}")
+                
+                
+                prof.step()
+                
+                if batch_idx > args["max_steps"]:
+                    if rank == 0:
+                        print("Max steps reached, stopping training", rank)
+                    break 
 
             # Print + log peak memory usage for the whole fourth step of training
             if epoch == 0 and (rank == 0 or args['verbose']):
@@ -999,9 +1039,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
         # Clean up
         dist.destroy_process_group()
-    if args["profiling_output"]:
-        prof.export_stacks(path = f"{args['profiling_output']}_{local_rank}.txt",
-                           metric = "self_cuda_time_total")
+    # if args["profiling_output"]:
+    #     prof.export_stacks(path = f"{args['profiling_output']}_{local_rank}.txt",
+    #                        metric = "self_cuda_time_total")
 
 def validate_args(args):
     if args["n_bits"] != 4 and args["train_type"] not in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
@@ -1051,12 +1091,22 @@ def fsdp_qlora(
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
     n_bits: int = 4, # passed to hqq
-    profiling_output: str = None, # Output file for profiling
+    profile: bool = False, # Enable PyTorch profiler
+    profiling_output: str = None, # Output directory for torch.profiler artifacts
+    with_stack: bool = False, # Output stacks for profiling
+    with_shapes: bool = False, # Output shapes for profiling
+    export_trace: bool = True, # Output trace for profiling
+    export_memory_timeline: bool = False, # Output memory timelinefor profiling
+    wait_steps: int = 1, # Wait steps when running profiler
+    warmup_steps: int = 0, # Warmup steps when running profiler
+    active_steps: int = 5,  # Active steps when running profiler
+    max_steps: int = 10, # For debugging
     ):
     """
     Train a model with FSDP and QLoRA/QDoRA.
 
     Args:
+    
         world_size: Number of GPUs to use. -1 = all available GPUs.
         train_type: "full", "lora", "qlora", or "custom_qlora"
         llama_pro_path: Path to the quantized llama pro model
@@ -1186,6 +1236,15 @@ def main(
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
     n_bits: int = 4, # passed to hqq
+    profile: bool_arg = False, # Whether to profile with torch.profiler
     profiling_output: str = "", # Output file prefix for profiling
+    with_stack: bool_arg = False, # Output stacks for profiling
+    with_shapes: bool_arg = False, # Output shapes for profiling
+    export_trace: bool_arg = True, # Output trace for profiling
+    export_memory_timeline: bool_arg = False, # Output memory timelinefor profiling
+    wait_steps: int = 1, # Wait steps when running profiler
+    warmup_steps: int = 1, # Warmup steps when running profiler
+    active_steps: int = 5,  # Active steps when running profiler
+    max_steps: int = 10, # Max number of training steps (in units of batches), only for debugging when epochs is set to 1
 ):
     fsdp_qlora(**locals())
