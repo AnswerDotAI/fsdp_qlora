@@ -48,7 +48,6 @@
 #Tested on `python=3.11.9 and torch=2.3.0``
 
 python train.py \
---world_size -1 \
 --model_name "meta-llama/Llama-2-7b-hf" \
 --gradient_accumulation_steps 2 \
 --batch_size 1 \
