@@ -485,11 +485,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     #Profiler args
     if args["profile"]:
         #Profiler args
-        with_stack = False if args["export_trace"] else args["with_stack"] #See https://github.com/pytorch/pytorch/issues/121219
-        with_shapes = args["with_shapes"]
         profile_memory = args["export_memory_timeline"]
         export_trace = args["export_trace"]
         export_memory_timeline = args["export_memory_timeline"]
+        with_stack = args["with_stack"] or args["export_memory_timeline"]#False if args["export_trace"] else (args["with_stack"] or args["export_memory_timeline"]) #See https://github.com/pytorch/pytorch/issues/121219
+        with_shapes = args["with_shapes"] or export_memory_timeline
         model_name = args["model_name"].split("/")[-1]
         train_type = args["train_type"]
         prefix = f"{model_name}_{train_type}"
@@ -1237,14 +1237,14 @@ def main(
     entity: str = None, # For wandb logging
     n_bits: int = 4, # passed to hqq
     profile: bool_arg = False, # Whether to profile with torch.profiler
-    profiling_output: str = "", # Output file prefix for profiling
-    with_stack: bool_arg = False, # Output stacks for profiling
-    with_shapes: bool_arg = False, # Output shapes for profiling
+    profiling_output: str = "profiles", # Output file prefix for profiling
+    with_stack: bool_arg = False, # Output stacks for profiling. Note that setting export_memory_timeline will automatically export traces since `with_stack` must be true to profile memory.
+    with_shapes: bool_arg = False, # Output shapes for profiling. Note that setting export_memory_timeline will automatically export traces since `with_shapes` must be true to profile memory.
     export_trace: bool_arg = True, # Output trace for profiling
     export_memory_timeline: bool_arg = False, # Output memory timelinefor profiling
     wait_steps: int = 1, # Wait steps when running profiler
     warmup_steps: int = 1, # Warmup steps when running profiler
-    active_steps: int = 5,  # Active steps when running profiler
+    active_steps: int = 2,  # Active steps when running profiler
     max_steps: int = 10, # Max number of training steps (in units of batches), only for debugging when epochs is set to 1
 ):
     fsdp_qlora(**locals())
