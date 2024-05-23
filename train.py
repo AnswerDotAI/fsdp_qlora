@@ -494,7 +494,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         train_type = args["train_type"]
         prefix = f"{model_name}_{train_type}"
         output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}-{local_rank}"
-        schedule = torch.profiler.schedule(wait=args["wait_steps"], warmup=args["warmup_steps"], active=args["active_steps"], repeat=1)
+        schedule = torch.profiler.schedule(wait=args["wait_steps"], warmup=args["warmup_steps"], active=args["active_steps"], repeat=args["repeat"])
         callback = functools.partial(trace_handler, 
                                     export_trace=export_trace, 
                                     export_memory_timeline=export_memory_timeline, 
@@ -515,6 +515,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             on_trace_ready=callback,
             experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True) if with_stack else None, # https://github.com/pytorch/pytorch/issues/100253
             )
+        if args["max_steps"] > 0:
+            #Ensure enough steps to accommodate profiler schedule
+            args["max_steps"] = max(args["max_steps"], args["wait_steps"] + args["warmup_steps"] + args["active_steps"])
     else:
         profiler_context = FakeContext()
     with profiler_context as prof:
@@ -961,9 +964,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 
                 prof.step()
                 
-                if batch_idx > args["max_steps"]:
+                if args["max_steps"] > 0 and batch_idx > args["max_steps"]:
                     if rank == 0:
-                        print("Max steps reached, stopping training", rank)
+                        print("Max steps reached, skipping rest of epoch")
                     break 
 
             # Print + log peak memory usage for the whole fourth step of training
@@ -1100,8 +1103,8 @@ def fsdp_qlora(
     wait_steps: int = 1, # Wait steps when running profiler
     warmup_steps: int = 0, # Warmup steps when running profiler
     active_steps: int = 5,  # Active steps when running profiler
-    max_steps: int = 10, # For debugging
-    ):
+    repeat: int = 1, #Number of profiler cycles (wait + warmup + active)
+    max_steps: int = -1, # Max number of training steps (in units of batches) per epoch. -1 means no max_steps, otherwise training loop breaks after `max_steps` each epoch.    ):
     """
     Train a model with FSDP and QLoRA/QDoRA.
 
@@ -1245,6 +1248,7 @@ def main(
     wait_steps: int = 1, # Wait steps when running profiler
     warmup_steps: int = 1, # Warmup steps when running profiler
     active_steps: int = 2,  # Active steps when running profiler
-    max_steps: int = 10, # Max number of training steps (in units of batches), only for debugging when epochs is set to 1
+    repeat: int = 1, #Number of profiler cycles (wait + warmup + active)
+    max_steps: int = -1, # Max number of training steps (in units of batches) per epoch. -1 means no max_steps, otherwise training loop breaks after `max_steps` each epoch.
 ):
     fsdp_qlora(**locals())

@@ -44,6 +44,9 @@
 
 # Note that `with_stack` and `with_shapes` are overridden by `export_memory_timeline` since the memory profile requires these options to be `True`.
 
+#**IMPORTANT** There are issues with recording stack traces and exporting traces simultaneously (see this [issue](https://github.com/pytorch/pytorch/issues/113564)) depending on `python` version.  The only combination I was able to get both to work at the same time was with `python=3.11.9` and `torch=2.3.0`.
+#Tested on `python=3.11.9 and torch=2.3.0``
+
 python train.py \
 --world_size -1 \
 --model_name "meta-llama/Llama-2-7b-hf" \
@@ -61,5 +64,4 @@ python train.py \
 --profile true \
 --export_trace true \
 --export_memory_timeline true \
---verbose true
-
+--max_steps 10
