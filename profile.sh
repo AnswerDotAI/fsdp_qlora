@@ -66,6 +66,9 @@ python train.py \
 --export_trace true \
 --export_memory_timeline false \
 --with_stack true \
---max_steps 50 \
---repeat 2 \
+--max_steps 20 \
+--repeat 0 \
+--warmup_steps 4 \
+--active_steps 1 \
+--profiling_frequency 5 \
 --profiling_output llama-test
