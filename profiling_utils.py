@@ -17,8 +17,8 @@ logger = logging.getLogger()
 
 #adapted from https://github.com/pytorch/torchtitan
        
-def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_cuda_time_total", with_stack=True, group_by_stack=0, group_by_input_shapes=False, row_limit=25):
-    curr_trace_dir_name = str(prof.step_num)
+def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_cuda_time_total", with_stack=True, group_by_stack=0, group_by_input_shape=False, row_limit=25):
+    curr_trace_dir_name = "iteration_" + str(prof.step_num)
     curr_trace_dir = os.path.join(output_dir, curr_trace_dir_name)
     if not os.path.exists(curr_trace_dir):
         os.makedirs(curr_trace_dir, exist_ok=True)
@@ -43,7 +43,7 @@ def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_c
 
     #Export event averages
     key_avgs = prof.key_averages(
-        group_by_input_shape=group_by_input_shapes, group_by_stack_n=group_by_stack
+        group_by_input_shape=group_by_input_shape, group_by_stack_n=group_by_stack
     ).table(sort_by=metric, row_limit=row_limit)
     with open(f"{curr_trace_dir}/rank{rank}_key_averages.txt", "w") as f:
         print(
@@ -56,10 +56,13 @@ def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_c
     torch.distributed.barrier()
 
 @contextlib.contextmanager
-def profiling_context(args, rank, *, global_step: int = 0):
-    enable_profiling = args.profile
-
+def profiling_context(args, rank):
+    enable_profiling = args["profile"]
+    
     if enable_profiling:          
+        output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}"
+        model_name = args["model_name"].split("/")[-1]
+        train_type = args["train_type"]
     
         logger.info(f"Profiling enabled. Traces will be saved at {output_dir}")
 
@@ -85,9 +88,6 @@ def profiling_context(args, rank, *, global_step: int = 0):
         export_memory_timeline = args["export_memory_timeline"]
         with_stack = args["with_stack"] or args["export_memory_timeline"]
         with_shapes = args["with_shapes"] or export_memory_timeline
-        model_name = args["model_name"].split("/")[-1]
-        train_type = args["train_type"]
-        output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}"
         callback = partial(trace_handler, rank=rank, 
                             export_memory_timeline=export_memory_timeline, 
                             output_dir=output_dir,
@@ -102,7 +102,7 @@ def profiling_context(args, rank, *, global_step: int = 0):
             ],
             with_stack=with_stack,
             profile_memory=profile_memory,
-            with_shapes=with_shapes,
+            record_shapes=with_shapes,
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
             on_trace_ready=callback,
             experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True) if with_stack else None,

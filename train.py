@@ -820,7 +820,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             ddp_loss = torch.zeros(2).to(local_rank)
 
             for batch_idx, batch in enumerate(dataloader):
-                prof.step_num = f"epoch{epoch}-batch{batch_idx}"
+                #prof.step_num = f"epoch{epoch}-batch{batch_idx}"
                      
                 accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
