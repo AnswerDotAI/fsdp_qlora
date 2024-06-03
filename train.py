@@ -820,7 +820,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             ddp_loss = torch.zeros(2).to(local_rank)
 
             for batch_idx, batch in enumerate(dataloader):
-                #prof.step_num = f"epoch{epoch}-batch{batch_idx}"
                      
                 accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
@@ -1056,6 +1055,7 @@ def fsdp_qlora(
     n_bits: int = 4, # passed to hqq
     profile: bool_arg = False, # Whether to profile with torch.profiler
     profiling_output: str = "profiles", # Output file prefix for profiling
+    overwrite_profiling_output: bool = True, # Overwrite output directory
     with_stack: bool_arg = False, # Output stacks for profiling. Note that setting export_memory_timeline will automatically export traces since `with_stack` must be true to profile memory.
     with_shapes: bool_arg = False, # Output shapes for profiling. Can impact performance.  Note that setting export_memory_timeline will automatically export traces since `with_shapes` must be true to profile memory.
     export_trace: bool_arg = True, # Output trace for profiling

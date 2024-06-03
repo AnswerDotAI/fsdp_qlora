@@ -11,6 +11,8 @@ import logging
 import torch
 import torch.distributed
 from functools import partial
+import shutil
+from torch.profiler import tensorboard_trace_handler
 WARMUP = 3
 
 logger = logging.getLogger()
@@ -26,7 +28,13 @@ def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_c
     #Export chrome / tensorboard trace
     logger.info(f"Dumping traces at step {prof.step_num}")
     begin = time.monotonic()
-    prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
+    
+    #Use tensorboard trace handler rather than directly exporting chrome traces since 
+    #tensorboard doesn't seem to be able to parse traces when with prof.export_chrome_trace
+    exporter = tensorboard_trace_handler(curr_trace_dir, worker_name=f"rank{rank}", use_gzip=True)
+    exporter(prof)
+    #prof.export_chrome_trace(f"{curr_trace_dir}/rank{rank}_trace.json")
+    
     logger.info(
         f"Finished dumping traces in {time.monotonic() - begin:.2f} seconds"
     )
@@ -60,14 +68,14 @@ def profiling_context(args, rank):
     enable_profiling = args["profile"]
     
     if enable_profiling:          
-        output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}"
         model_name = args["model_name"].split("/")[-1]
         train_type = args["train_type"]
-    
-        logger.info(f"Profiling enabled. Traces will be saved at {output_dir}")
-
+        output_dir = args["profiling_output"] if args["profiling_output"] else f"./{model_name}_{train_type}"
+      
         if not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
+        
+        logger.info(f"Profiling enabled. Traces will be saved at {output_dir}")
 
         warmup = args["warmup_steps"]
         active = args["active_steps"]
