@@ -59,3 +59,69 @@ Detailed `CLI` options:
 The default schedule for the profiler is set such that to continuously execute a 10-step cycle: wait for 7, warmup for 2, record for 1.
 
 `with_stack` and `with_shapes` are overridden by `export_memory_timeline` since the memory profile requires these options to be `True`.
+
+#### Examples
+
+- Record every 5th step, exporting a `chrome` / `tensorboard` trace for each cycle:
+
+  ```
+  python train.py \
+  --model_name "hf-internal-testing/tiny-random-LlamaForCausalLM" \
+  --gradient_accumulation_steps 2 \
+  --batch_size 1 \
+  --context_length 256 \
+  --num_epochs 1 \
+  --sharding_strategy full_shard \
+  --precision bf16 \
+  --train_type qlora \
+  --use_gradient_checkpointing false \
+  --use_cpu_offload false \
+  --log_to stdout \
+  --dataset dummy \
+  --profile true \
+  --export_trace true \
+  --export_memory_timeline false \
+  --with_stack true \
+  --num_epochs 1 \
+  --max_steps 20 \
+  --repeat 0 \
+  --warmup_steps 4 \
+  --active_steps 1 \
+  --profiling_frequency 5 \
+  --profiling_output llama-test
+  ```
+
+  The output will be a 4 trace output folders, at iteration 5, 10, ..., each containing a trace with a single training step at that iteration.
+
+  Also in the folder will be exported stacks (which can be visualized using flamegraphs or other stack viewers) and `key_averages`, which is a summary table of operations ordered by `cuda` time.
+
+  Note that we set `max_steps=20` so that the training loop will exit after 20 batches. If `max_steps=-1` (the default setting), the profiler will repeat the cycle during the entire training run.
+
+- Record 5 steps (after 1 warmup step) then stop profiling:
+  ```
+  python train.py \
+  --model_name "hf-internal-testing/tiny-random-LlamaForCausalLM" \
+  --gradient_accumulation_steps 2 \
+  --batch_size 1 \
+  --context_length 256 \
+  --num_epochs 1 \
+  --sharding_strategy full_shard \
+  --precision bf16 \
+  --train_type qlora \
+  --use_gradient_checkpointing false \
+  --use_cpu_offload false \
+  --log_to stdout \
+  --dataset dummy \
+  --profile true \
+  --export_trace true \
+  --export_memory_timeline true \
+  --with_stack true \
+  --num_epochs 1 \
+  --max_steps 20 \
+  --repeat 1 \
+  --warmup_steps 1 \
+  --active_steps 5 \
+  --profiling_output llama-test2
+  ```
+  The output will be a single trace at `iteration_6` which contains 5 training steps.
+  In addition to the `stacks` and `key_averages` artifacts, there will be a `memory_timeline` `html`, which shows a breakdown of memory usage by `parameter`, `gradients`, `activations`, etc.

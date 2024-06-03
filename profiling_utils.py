@@ -19,7 +19,7 @@ logger = logging.getLogger()
 
 #adapted from https://github.com/pytorch/torchtitan
        
-def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_cuda_time_total", with_stack=True, group_by_stack=0, group_by_input_shape=False, row_limit=25):
+def trace_handler(prof: torch.profiler.profiler.profile, rank, export_memory_timeline, output_dir, metric="self_cuda_time_total", with_stack=True, group_by_stack=0, group_by_input_shape=False, row_limit=25):
     curr_trace_dir_name = "iteration_" + str(prof.step_num)
     curr_trace_dir = os.path.join(output_dir, curr_trace_dir_name)
     if not os.path.exists(curr_trace_dir):
@@ -41,10 +41,23 @@ def trace_handler(prof, rank, export_memory_timeline, output_dir, metric="self_c
     
     #Construct the memory timeline file.
     if export_memory_timeline:
-        prof.export_memory_timeline(
-        f"{curr_trace_dir}/rank{rank}_memory-timeline.html"
-    )
-
+        try:
+            prof.export_memory_timeline(
+            f"{curr_trace_dir}/rank{rank}_memory-timeline.html"
+        )
+        except:
+            logger.info("Failed to export memory timeline to html, retrying as gzipped json.")
+            try:
+                prof.export_memory_timeline(
+                    f"{curr_trace_dir}/rank{rank}_memory-timeline.json.gz"
+                )
+            except:
+                
+                logger.info("Failed to export memory timeline to gzipped json. Saving profiler timeline object instead.")
+                from torch.profiler._memory_profiler import MemoryProfileTimeline
+                memory_profile = MemoryProfileTimeline(prof._memory_profile())
+                torch.save(memory_profile, f"{curr_trace_dir}/rank{rank}_memory-timeline.pt")
+                
     #Dump stack traces
     if with_stack:
         prof.export_stacks(f"{curr_trace_dir}/rank{rank}_stacks.txt", metric=metric)

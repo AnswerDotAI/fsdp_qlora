@@ -1207,7 +1207,7 @@ def main(
     with_shapes: bool_arg = False, # Output shapes for profiling. Can impact performance.  Note that setting export_memory_timeline will automatically export traces since `with_shapes` must be true to profile memory.
     export_trace: bool_arg = True, # Output trace for profiling
     export_memory_timeline: bool_arg = False, # Output memory timelinefor profiling
-    wait_steps: int = 1, # Wait steps when running profiler.  Only used if repeat != 0.
+    wait_steps: int = 0, # Wait steps when running profiler.  Only used if repeat != 0.
     warmup_steps: int = 1, # Warmup steps when running profiler
     active_steps: int = 2,  # Active steps when running profiler
     repeat: int = 0, #Number of profiler cycles (wait + warmup + active) if > 0, else repeats forever
