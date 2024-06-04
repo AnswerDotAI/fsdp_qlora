@@ -15,63 +15,84 @@ models, we'd suggest holding off for a few months while the community more fully
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy, math, types, sys
+import copy
 import functools
-import torch.optim as optim
-from torch.optim.lr_scheduler import LambdaLR
-from transformers.optimization import get_linear_schedule_with_warmup
+import gc
+import math
+import os
+import sys
+import time
+import types
+from contextlib import nullcontext
+from glob import glob
+from pathlib import Path
+from typing import Dict, List
+
 import bitsandbytes as bnb
+import safetensors
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.profiler import profile, record_function, ProfilerActivity
-from contextlib import nullcontext
-from safetensors.torch import save_file
-from tqdm.auto import tqdm
-from typing import List, Dict
-from pathlib import Path
-from glob import glob
-from packaging.version import parse
-
-# Argument parsing
-from fastcore.script import call_parse, bool_arg, Param
-
-# Torch + distributed training
-from torch import nn, Tensor
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
-
-# FSDP
-from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, transformer_auto_wrap_policy
-from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload, ShardingStrategy
-from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
-from torch.distributed.fsdp import StateDictType, FullStateDictConfig
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper,
-    offload_wrapper,
-    CheckpointImpl,
-    apply_activation_checkpointing,
-)
+import torch.optim as optim
+from accelerate import init_empty_weights
+from accelerate.utils import set_seed
 
 # Model loading
 from bitsandbytes.nn import Linear4bit, Params4bit
-from accelerate import init_empty_weights
-from accelerate.utils import set_seed
-from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 from fastcore.parallel import parallel
 
+# Argument parsing
+from fastcore.script import Param, bool_arg, call_parse
+from packaging.version import parse
+from safetensors.torch import save_file
+
+# Torch + distributed training
+from torch import Tensor, nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointImpl,
+    apply_activation_checkpointing,
+    checkpoint_wrapper,
+    offload_wrapper,
+)
+
+# FSDP
+from torch.distributed.fsdp import FullStateDictConfig, MixedPrecision, StateDictType
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload, ShardingStrategy
+from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
+from torch.distributed.fsdp.wrap import (
+    _or_policy,
+    lambda_auto_wrap_policy,
+    transformer_auto_wrap_policy,
+)
+from torch.nn.utils.rnn import pad_sequence
+from torch.optim.lr_scheduler import LambdaLR
+from torch.profiler import ProfilerActivity, profile, record_function
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from tqdm.auto import tqdm
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.optimization import get_linear_schedule_with_warmup
+from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME, hub
+
 try:
-    from hqq.core.quantize import HQQLinear, HQQBackend, BaseQuantizeConfig
+    from hqq.core.quantize import BaseQuantizeConfig, HQQBackend, HQQLinear
 except ImportError:
     HQQLinear = None
     pass
 
 # To add a new model, import the transformer, attention, & MLP layers
 # for the wrapping policy and `check_fn` in activation checkpointing
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
+from transformers.models.llama.modeling_llama import (
+    LLAMA_ATTENTION_CLASSES,
+    LlamaDecoderLayer,
+    LlamaMLP,
+)
+from transformers.models.mistral.modeling_mistral import (
+    MISTRAL_ATTENTION_CLASSES,
+    MistralDecoderLayer,
+    MistralMLP,
+)
 
 # To get rid of tokenizers warnings for now
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -84,9 +105,11 @@ except ImportError:
 
 # LoRA and DORA modules
 sys.path.append("./scripts")
-from lora import LORA
 from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
+from lora import LORA
+
 from profiling_utils import profiling_context
+
 
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
@@ -443,7 +466,7 @@ def get_optimizer(model:nn.Module, args:Dict):
 # Wrap the model using LoRA policy from llama-recipes or custom policy:
 # This checks for lora layers (has weight and requires_grad)
 def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
-    from peft.tuners import PromptEncoder, PromptEmbedding, PrefixEncoder
+    from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
 
     if custom_policy:
         def lambda_policy_fn(module):
@@ -644,7 +667,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # PEFT setup (LoRA and QLoRA)
     if args["train_type"] in ["lora", "qlora"]:
-        from peft import get_peft_model, LoraConfig, TaskType
+        from peft import LoraConfig, TaskType, get_peft_model
 
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM, inference_mode=False,
@@ -926,6 +949,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 
                 prof.step()
                 
+                #Primarily for debugging
                 if args["max_steps"] > 0 and batch_idx > args["max_steps"]:
                     if rank == 0:
                         print("Max steps reached, skipping rest of epoch")
@@ -1053,6 +1077,7 @@ def fsdp_qlora(
     group: str = None, # For wandb logging
     entity: str = None, # For wandb logging
     n_bits: int = 4, # passed to hqq
+    #Profiling args
     profile: bool_arg = False, # Whether to profile with torch.profiler
     profiling_output: str = "profiles", # Output file prefix for profiling
     overwrite_profiling_output: bool = True, # Overwrite output directory
