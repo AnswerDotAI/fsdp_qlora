@@ -1,9 +1,18 @@
 ## Profiling
 
-## Usage
+Documentation for how to profile your training runs.
+
+**Tips**
+
+- Only record what is necessary as profiling can significantly slow down training process.
+- Set a `torch.profile.schedule` when running the profiler (description below), as trace artifacts are exported at the end of each profiling cycle and can be very large (on the order of hundreds of MBs each).
 
 **IMPORTANT**
-There are issues with recording stack traces and exporting traces simultaneously (see this [issue](https://github.com/pytorch/pytorch/issues/113564)) depending on `python` version. The only combination I was able to get both to work at the same time was with `python=3.11.9` and `torch=2.3.0`.
+There are issues with recording stack traces and exporting traces simultaneously (see this [issue](https://github.com/pytorch/pytorch/issues/113564)) depending on `python` version.
+
+Tested with `python=3.11.9` and `torch=2.3.0`.
+
+## Quickstart
 
 Running the following:
 
@@ -19,17 +28,28 @@ python train.py \
 
 will result in a directory `{model_name}_{train_type}-{local_rank}` with the following artifacts:
 
-- `{model_name}-{train_type}-chrome-trace.json.gz` - interactive trace that can be viewed using `chrome::tracing` or `perfetto`
+- `{model_name}-{train_type}-chrome-trace.json.gz` - interactive trace that can be viewed using `chrome::tracing`, `perfetto`, or `tensorboard`
 - `{model_name}-{train_type}-key_averages.txt` - sorted table of events, e.g.:
 
-```
-
-```
+| Name                                                                              | Self CPU % | Self CPU | CPU total % | CPU total | CPU time avg | Self CUDA | Self CUDA % | CUDA total | CUDA time avg | # of Calls | Source Location                                                          |
+| --------------------------------------------------------------------------------- | ---------- | -------- | ----------- | --------- | ------------ | --------- | ----------- | ---------- | ------------- | ---------- | ------------------------------------------------------------------------ |
+| ncclDevKernel_AllGather_RING_LL(ncclDevComm*, unsigned int*, unsigned int\*, int) | 0.00%      | 0.000us  | 0.00%       | 0.000us   | 0.000us      | 88.038ms  | 12.14%      | 88.038ms   | 830.547us     | 106        | <built-in method \_allgather_base of PyCapsule object at 0x7f2760c2ea30> |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/distributed/distributed_c10d.py(2864): all_gather_into_tensor      |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/distributed/c10d_logger.py(72): wrapper                            |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/distributed/fsdp/\_flat_param.py(1366): \_all_gather_flat_param    |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/distributed/fsdp/\_flat_param.py(1285): unshard                    |
+| FullyShardedDataParallel.forward                                                  | 0.00%      | 0.000us  | 0.00%       | 0.000us   | 0.000us      | 59.050ms  | 8.14%       | 59.050ms   | 59.050ms      | 1          | <built-in method embedding of type object at 0x7f281c5787c0>             |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/nn/functional.py(2154): embedding                                  |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/nn/modules/sparse.py(162): forward                                 |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | torch/nn/modules/module.py(1534): \_call_impl                            |
+|                                                                                   |            |          |             |           |              |           |             |            |               |            | nn.Module: Embedding_0                                                   |
 
 - `{model_name}-{train_type}-memory-timeline.html` - Stacked time series plot of memory use broken down by `Parameter`, `Gradients`, `Activations`, etc.
 - `{model_name}-{train_type}-stacks.txt` - Stack trace. See [docs](https://pytorch.org/docs/stable/profiler.html#torch.profiler._KinetoProfile.export_stacks).
 
-Detailed `CLI` options:
+## Detailed Usage
+
+`CLI` options in full:
 
 - `profile` - whether to profile
 - `profiling_outputs` - output directory for `torch.profiler` artifacts
@@ -48,19 +68,19 @@ Detailed `CLI` options:
     **Note**: Simplest to think of 2 ways of scheduling the profiler:
 
     1. Set `repeat` to the number of total number of desired profiling cycles. For example if `wait=1`, `warmup=1`, `active=1`, and `repeat=1`, then the profiler will wait for 1 step, warmup for 1, and record for 1 then stop.
-    2. Set `repeat` to `0` and `profiling_frequency` to the cycle length. E.g., with `repeat=0`, `profiling_frequency=10`, `warmup=2`, `active=1`, then `wait` will be automatically set to `profiling_frequency - (warmup + active) = 7`. The profiler will then continuously execute the following cycle: wait for 7 steps, warmup for 2, record for 1.
+    2. Set `repeat` to `0` and `profiling_frequency` to the cycle length. E.g., with `repeat=0`, `profiling_frequency=10`, `warmup=2`, `active=1`, then `wait` will be automatically set to `profiling_frequency - (warmup + active) = 7`. The profiler will then continuously execute the following cycle: wait for 7 steps, warmup for 2, record for 1 for the entire training run.
 
     See [docs](https://pytorch.org/docs/stable/profiler.html#torch.profiler.schedule) for further details.
 
 - `max_steps` - maximum number of batches per epoch. E.g., with `num_epochs=1`, stops training after `max_steps` of batches. Note that this is automatically adjusted to accommodate the profiler schedule; for example, if `max_steps < wait_steps + warmup_steps + active_steps`, it will automatically be set to `wait_steps + warmup_steps + active_steps` such that the profiler can run for at least 1 cycle.
 
-#### Additional Notes
+## Additional Notes
 
-The default schedule for the profiler is set such that to continuously execute a 10-step cycle: wait for 7, warmup for 2, record for 1.
+The default schedule for the profiler is set to continuously execute a 10-step cycle: wait for 7, warmup for 2, record for 1.
 
 `with_stack` and `with_shapes` are overridden by `export_memory_timeline` since the memory profile requires these options to be `True`.
 
-#### Examples
+## Examples
 
 - Record every 5th step, exporting a `chrome` / `tensorboard` trace for each cycle:
 
@@ -118,9 +138,9 @@ The default schedule for the profiler is set such that to continuously execute a
   --with_stack true \
   --num_epochs 1 \
   --max_steps 20 \
-  --repeat 1 \
   --warmup_steps 1 \
   --active_steps 5 \
+  --repeat 1 \
   --profiling_output llama-test2
   ```
   The output will be a single trace at `iteration_6` which contains 5 training steps.
