@@ -775,8 +775,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             
             if args["train_type"] in ["hqq_lora", "hqq_dora", "hqq_llama_pro"]:
                 # TODO: Tune BaseQuantizeConfig.
-                quant_config = BaseQuantizeConfig(nbits=int(args["n_bits"]), group_size=64, quant_zero=True,
-                                                  quant_scale=True, offload_meta=True, view_as_float=True, axis=1)
+                quant_config = BaseQuantizeConfig(nbits=int(args["n_bits"]), group_size=64, quant_zero=False,
+                                                  quant_scale=False, offload_meta=False, view_as_float=True, axis=1)
+                # quant_config = BaseQuantizeConfig(nbits=int(args["n_bits"]), group_size=64, quant_zero=True,
+                #                                   quant_scale=True, offload_meta=True, view_as_float=True, axis=1)
                 # model.model = replace_linear(model.model, HQQLinear, quant_config, device=rank,
                 #                              compute_dtype=compute_dtype, del_orig=True, initialize=False, skip_modules=skip_modules)
                 # HQQLinear.set_backend(HQQBackend.ATEN_BACKPROP)
