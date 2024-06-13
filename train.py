@@ -505,7 +505,7 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
 
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
-    
+
     # Setup and initialize the process group
     os.environ['MASTER_ADDR'] = args["master_addr"]
     os.environ['MASTER_PORT'] = args["master_port"]
@@ -843,7 +843,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             ddp_loss = torch.zeros(2).to(local_rank)
 
             for batch_idx, batch in enumerate(dataloader):
-                     
+
                 accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
 
                 # Prevent gradient syncing until update step if using no_sync option.
@@ -943,17 +943,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         if args["log_to"] == 'wandb':
                             logger.log({"loss": log_loss, "lr": log_lr}, rank)
                     ddp_loss = torch.zeros(2).to(local_rank)
-                
-                if rank == 0:
+
+                if rank == 0 and args['verbose']:
                     print(f"Batch idx {batch_idx}")
-                
+
                 prof.step()
-                
+
                 #Primarily for debugging
                 if args["max_steps"] > 0 and batch_idx > args["max_steps"]:
                     if rank == 0:
                         print("Max steps reached, skipping rest of epoch")
-                    break 
+                    break
 
             # Print + log peak memory usage for the whole fourth step of training
             if epoch == 0 and (rank == 0 or args['verbose']):
@@ -1089,14 +1089,14 @@ def fsdp_qlora(
     warmup_steps: int = 1, # Warmup steps when running profiler
     active_steps: int = 2,  # Active steps when running profiler
     repeat: int = 0, #Number of profiler cycles (wait + warmup + active) if > 0, else repeats forever
-    profiling_frequency: int = 10, # Profiling frequency in steps.  Only used if repeat == 0, in which case wait_steps will be set to profiling_frequency - (warmup_steps + active_steps) such that the effective cycle length == profiling_frequency 
+    profiling_frequency: int = 10, # Profiling frequency in steps.  Only used if repeat == 0, in which case wait_steps will be set to profiling_frequency - (warmup_steps + active_steps) such that the effective cycle length == profiling_frequency
     max_steps: int = -1, # Max number of training steps (in units of batches) per epoch. -1 means no max_steps, otherwise training loop breaks after `max_steps` each epoch.
 ):
     """
     Train a model with FSDP and QLoRA/QDoRA.
 
     Args:
-    
+
         world_size: Number of GPUs to use. -1 = all available GPUs.
         train_type: "full", "lora", "qlora", or "custom_qlora"
         llama_pro_path: Path to the quantized llama pro model
@@ -1236,7 +1236,7 @@ def main(
     warmup_steps: int = 1, # Warmup steps when running profiler
     active_steps: int = 2,  # Active steps when running profiler
     repeat: int = 0, #Number of profiler cycles (wait + warmup + active) if > 0, else repeats forever
-    profiling_frequency: int = 10, # Profiling frequency in steps.  Only used if repeat == 0, in which case wait_steps will be set to profiling_frequency - (warmup_steps + active_steps) such that the effective cycle length == profiling_frequency 
+    profiling_frequency: int = 10, # Profiling frequency in steps.  Only used if repeat == 0, in which case wait_steps will be set to profiling_frequency - (warmup_steps + active_steps) such that the effective cycle length == profiling_frequency
     max_steps: int = -1, # Max number of training steps (in units of batches) per epoch. -1 means no max_steps, otherwise training loop breaks after `max_steps` each epoch.
 ):
     fsdp_qlora(**locals())
