@@ -144,6 +144,8 @@ def replace_linear(model:nn.Module, linear_replacement:nn.Module,
 	
 	layers_4bit = ["q_proj", "k_proj", "v_proj", "o_proj"]
 	layers_2bit = ["gate_proj", "up_proj", "down_proj"]
+ 
+	 # layers_4bit = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 	
 	for name, module in model.named_children():
 		if name in skip_modules:
@@ -711,6 +713,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 	cfg = None
 	attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
 	# attn_impl = "flash_attention_2"
+	import transformers
+	print(f"Transformers: {transformers.__file__}") # should point to the fork.
 	if rank == 0 or args['verbose']:
 		print("Creating model", rank)
 	if args["train_type"] in ["full", "lora", "custom_lora"]:
@@ -731,6 +735,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 				model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
 			if args["precision"] == "bf16":
 				model.to(torch_dtype)
+	
+		model.config.use_cla = args["use_cla"]
+		model.config.cla_factor = args["cla_factor"]
+
 	elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]: # Our custom loading
 		cfg = AutoConfig.from_pretrained(args["model_name"])
 		cfg.use_cache = False
@@ -1305,6 +1313,8 @@ def main(
 	group: str = None, # For wandb logging
 	entity: str = None, # For wandb logging
 	n_bits: int = 4, # passed to hqq
+	 use_cla: bool_arg = False, # Use CLA attention
+	  cla_factor: int = 1, # Use CLA attention
 ):
 
 	# Set world size
