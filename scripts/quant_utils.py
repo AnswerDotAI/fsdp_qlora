@@ -77,16 +77,31 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
             if value_key == "weight":
                 # Like `Params4bit`, this workaround quantizes `HQQLinear`` per device so the quantization
                 # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
+                # import pdb; pdb.set_trace()
                 submodule.linear_layer.to_empty(device=device)
                 submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
                 setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
                 submodule.initialize()
-                if to_meta:
-                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
-                elif to_cpu:
-                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
+                
+                # print(value)
+                # print(submodule.linear_layer.weight.data)                      
+                # print(name, submodule.W_q)
+                try:
+                    if to_meta:
+                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
+                    elif to_cpu:
+                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
+                    print("success: ", name)
+                except NotImplementedError as e:
+                    print("error:", name, str(e))
+                    print(name, value, submodule.linear_layer.weight.data.norm(), submodule.W_q)
+                    raise e
+                
                 submodule.in_gpu = False
-    
+        else:
+            param = submodule.get_parameter(value_key)
+            value = type(param)(place_on_device(value).data)     
+                       
     except AttributeError:
         # it's a buffer
         value = place_on_device(value)
@@ -94,3 +109,5 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
     
     if HQQLinear is None or not isinstance(submodule, HQQLinear):
         setattr(submodule, value_key, value)
+        
+    

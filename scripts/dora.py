@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import bitsandbytes as bnb
 
 # Wrapping policy requires modules, base_layer has no grad params, lora_A, lora_B, dora_scale have grad params.
 class DORALayer(nn.Module):

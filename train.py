@@ -15,27 +15,17 @@ models, we'd suggest holding off for a few months while the community more fully
 # Imports
 
 # General
-import torch, os, gc, time, safetensors, copy, math, types, sys, json
+import torch, os, time, safetensors, sys, json
 import functools
-import torch.optim as optim
-from torch.optim.lr_scheduler import LambdaLR
-from transformers.optimization import get_linear_schedule_with_warmup
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from contextlib import nullcontext
 from safetensors.torch import save_file
 from tqdm.auto import tqdm
-from typing import List, Dict
-from pathlib import Path
-from glob import glob
+from typing import Dict
 
 # Argument parsing
 from fastcore.script import call_parse, bool_arg, Param
-
-# Torch + distributed training
-from torch import nn, Tensor
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
 # FSDP
 from torch.distributed.fsdp import MixedPrecision, FullyShardedDataParallel as FSDP
@@ -76,11 +66,11 @@ except ImportError:
     pass
 
 # LoRA and DORA modules
-sys.path.append("./scripts")
-from dora import HQQDORA
-from quant_utils import replace_linear, load_and_quantize
-from train_utils import Logger, update_progress_bar, get_wrapping_policy, get_optimizer, get_lr_scheduler
-from dataset_utils import get_dataloader
+sys.path.append(".")
+from scripts.dora import HQQDORA
+from scripts.quant_utils import replace_linear, load_and_quantize
+from scripts.train_utils import Logger, update_progress_bar, get_wrapping_policy, get_optimizer, get_lr_scheduler
+from scripts.dataset_utils import get_dataloader
 
     
 # Main function, run on each process
@@ -137,10 +127,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Set up dataloader
     dataloader = get_dataloader(tokenizer, args)
 
-    # Create model
-    cfg = None
-    # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
-    attn_impl = "flash_attention_2"
+    attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
+    # attn_impl = "flash_attention_2"
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
         
@@ -152,7 +140,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg.num_hidden_layers = 1
     ### DEBUG END ###
     
-    skip_modules = ["lm_head"]
     
     # RoPE scaling.
     if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
@@ -163,7 +150,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.rope_scaling["type"] = args["rope_type"]
         cfg.rope_scaling["factor"] = rope_scaling_factor
         cfg._rope_scaling_validation()
-    
     if args["rope_type"] != "dynamic":
         cfg.max_position_embeddings = max(cfg.max_position_embeddings, args["context_length"])
     
@@ -221,24 +207,38 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         layer_groupsizes = {**{layer:groupsize_4bit for layer in layers_4bit},
                             **{layer:groupsize_2bit for layer in layers_2bit}}
             
-        model.model = replace_linear(model.model, HQQLinear, quant_config_4bit, quant_config_2bit,
-                                        layers_4bit=layers_4bit, layers_2bit=layers_2bit,
-                                        device=rank,compute_dtype=compute_dtype, del_orig=True, 
-                                        initialize=False, skip_modules=skip_modules)
-        HQQLinear.set_backend(HQQBackend.PYTORCH_BACKPROP) # needed for axis=1.          
+        skip_modules = ["lm_head"]
+        model.model = replace_linear(model.model, HQQLinear, 
+                                        quant_config_4bit, 
+                                        quant_config_2bit,
+                                        layers_4bit=layers_4bit, 
+                                        layers_2bit=layers_2bit,
+                                        device=rank,
+                                        compute_dtype=compute_dtype, 
+                                        del_orig=True, 
+                                        initialize=False, 
+                                        skip_modules=skip_modules)
+        HQQLinear.set_backend(HQQBackend.PYTORCH_BACKPROP) # needed for axis=1.         
+        
+        if rank == 0 or args['verbose']:
+            print("Replaced model:", model)
 
         # Pretrained files.
-        try:
-            idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-            files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-        except OSError:
+        from pathlib import Path
+        if args["model_files_dir"] is not None: # for testing custom model configs.
+            files = list(Path(args["model_files_dir"]).glob("*.safetensors"))
+        else:        
             try:
-                # This means the model doesn't have a model.safetensors.index.json because it is not sharded
-                files = []
-                files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
-            except OSError as e:
-                # This means the model probably doesn't have a safetensors file
-                raise e
+                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+                files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
+            except OSError:
+                try:
+                    # This means the model doesn't have a model.safetensors.index.json because it is not sharded
+                    files = []
+                    files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
+                except OSError as e:
+                    # This means the model probably doesn't have a safetensors file
+                    raise e
 
         # Loading and quantization.
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
@@ -631,6 +631,7 @@ def main(
     no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    model_files_dir: str = None, # Directory containing model files for testing custom model configs
     save_model: bool_arg = False, # Save the resulting model
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
     output_dir: str = "output", # Output directory to save the final model to
@@ -685,9 +686,6 @@ def main(
         args["no_sync"] = True
     elif args["no_sync"] and args["gradient_accumulation_steps"] == 1:
         args["no_sync"] = False
-
-    if args["train_type"] in ["hqq_lora"] and HQQLinear is None:
-        raise ValueError("HQQ is required to train with `train_type='hqq_lora'`. See ReadMe for details.")
 
     # Run
     mp.spawn(fsdp_main,

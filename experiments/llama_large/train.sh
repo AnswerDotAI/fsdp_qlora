@@ -2,7 +2,7 @@
 
 cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
---model_name meta-llama/Meta-Llama-3-70B-Instruct \
+--model_name meta-llama/Meta-Llama-3-8B-Instruct \
 --dataset /workspace/data/hqq_plus_dataset \
 --batch_size 4 \
 --context_length 1024 \
@@ -16,4 +16,4 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --verbose true \
 --project_name "fsdp-quantized-large-llama-ft-exps" \
 --save_model true \
---output_dir /workspace/models/llama-3-8b-instruct-hqq-dora-plus-plus
+--output_dir /workspace/models/llama-3-8b-instruct-hqq-dora-plus-plus 2>&1 | tee train.log
