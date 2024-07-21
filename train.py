@@ -132,7 +132,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
         
-    cfg = AutoConfig.from_pretrained(args["model_name"])
+    if args["model_files_dir"] is not None:
+        print("Using custom model config")
+        cfg = AutoConfig.from_pretrained(os.path.join(args["model_files_dir"], "config.json"))
+    else:
+        cfg = AutoConfig.from_pretrained(args["model_name"])
     cfg.use_cache = False
     cfg._attn_implementation = attn_impl
     
