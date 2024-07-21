@@ -11,7 +11,8 @@ def replace_linear(model:nn.Module,
                    quant_config_2bit:dict|None=None,
                    layers_4bit:List[str]=[], 
                    layers_2bit:List[str]=[],
-                   skip_modules:List[str]=["lm_head"], **kwargs):
+                   skip_modules:List[str]=["lm_head"], 
+                   **kwargs):
     """
     Replace linear modules with a new Linear module.
     Parameters:
@@ -29,8 +30,14 @@ def replace_linear(model:nn.Module,
             continue
         
         if len(list(module.children())) > 0:
-            replace_linear(module, linear_replacement, quant_config_4bit, quant_config_2bit, 
-                           layers_4bit, layers_2bit, skip_modules, **kwargs)
+            replace_linear(module, 
+                           linear_replacement=linear_replacement, 
+                           quant_config_4bit=quant_config_4bit, 
+                           quant_config_2bit=quant_config_2bit, 
+                           layers_4bit=layers_4bit, 
+                           layers_2bit=layers_2bit, 
+                           skip_modules=skip_modules, 
+                           **kwargs)
 
         if isinstance(module, torch.nn.Linear):
             if issubclass(linear_replacement, HQQLinear):
@@ -77,25 +84,16 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
             if value_key == "weight":
                 # Like `Params4bit`, this workaround quantizes `HQQLinear`` per device so the quantization
                 # meta dictionary is created on all ranks, before converting to meta on non-rank 0.
-                # import pdb; pdb.set_trace()
+                
                 submodule.linear_layer.to_empty(device=device)
                 submodule.linear_layer.weight.data.copy_(value.to(device=device, dtype=dtype))
                 setattr(submodule, "dora_scale", value.norm(p=2, dim=1).to(dtype=dtype).to("cpu"))
                 submodule.initialize()
-                
-                # print(value)
-                # print(submodule.linear_layer.weight.data)                      
-                # print(name, submodule.W_q)
-                try:
-                    if to_meta:
-                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
-                    elif to_cpu:
-                        setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
-                    print("success: ", name)
-                except NotImplementedError as e:
-                    print("error:", name, str(e))
-                    print(name, value, submodule.linear_layer.weight.data.norm(), submodule.W_q)
-                    raise e
+
+                if to_meta:
+                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
+                elif to_cpu:
+                    setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
                 
                 submodule.in_gpu = False
         else:

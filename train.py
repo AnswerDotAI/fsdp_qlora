@@ -140,7 +140,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg.num_hidden_layers = 1
     ### DEBUG END ###
     
-    
     # RoPE scaling.
     if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
         if args["precision"] != "bf16_buffers_autocast":
@@ -183,8 +182,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 setattr(layer, 'self_attn', attn_cls(m.config, m.layer_idx))
         
         # Quantization config.
-        groupsize_2bit = 64
         groupsize_4bit = 128
+        groupsize_2bit = 64
         quant_config_4bit = BaseQuantizeConfig(nbits=4, group_size=groupsize_4bit, quant_zero=False,
                                                 quant_scale=False, offload_meta=False, view_as_float=True, axis=1)
         quant_config_2bit = BaseQuantizeConfig(nbits=2, group_size=groupsize_2bit, quant_zero=False,
@@ -208,9 +207,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                             **{layer:groupsize_2bit for layer in layers_2bit}}
             
         skip_modules = ["lm_head"]
-        model.model = replace_linear(model.model, HQQLinear, 
-                                        quant_config_4bit, 
-                                        quant_config_2bit,
+        model.model = replace_linear(model=model.model, 
+                                        linear_replacement=HQQLinear, 
+                                        quant_config_4bit=quant_config_4bit, 
+                                        quant_config_2bit=quant_config_2bit,
                                         layers_4bit=layers_4bit, 
                                         layers_2bit=layers_2bit,
                                         device=rank,
@@ -220,58 +220,66 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                                         skip_modules=skip_modules)
         HQQLinear.set_backend(HQQBackend.PYTORCH_BACKPROP) # needed for axis=1.         
         
-        if rank == 0 or args['verbose']:
-            print("Replaced model:", model)
+    if rank == 0 or args['verbose']:
+        print("Replaced model:", model)
 
-        # Pretrained files.
-        from pathlib import Path
-        if args["model_files_dir"] is not None: # for testing custom model configs.
-            files = list(Path(args["model_files_dir"]).glob("*.safetensors"))
-        else:        
+    # Pretrained files.
+    from pathlib import Path
+    if args["model_files_dir"] is not None: # for testing custom model configs.
+        files = list(Path(args["model_files_dir"]).glob("*.safetensors"))
+    else:        
+        try:
+            idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
+            files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
+        except OSError:
             try:
-                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-                files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-            except OSError:
-                try:
-                    # This means the model doesn't have a model.safetensors.index.json because it is not sharded
-                    files = []
-                    files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
-                except OSError as e:
-                    # This means the model probably doesn't have a safetensors file
-                    raise e
+                # This means the model doesn't have a model.safetensors.index.json because it is not sharded
+                files = []
+                files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
+            except OSError as e:
+                # This means the model probably doesn't have a safetensors file
+                raise e
 
-        # Loading and quantization.
-        # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
-        # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
-        def load_and_quantize_parallel(name_param, model, **kwargs):
-            name, param = name_param
-            load_and_quantize(model, name, param, **kwargs)
+    # Loading and quantization.
+    # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
+    # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
+    def load_and_quantize_parallel(name_param, model, **kwargs):
+        name, param = name_param
+        load_and_quantize(model, name, param, **kwargs)
 
-        param_count = sum((p.numel() for n,p in model.named_parameters()))
-        if rank == 0 or args['verbose']:
-            print("Loading model", rank)
-        if rank == 0 and args['verbose']:
-            print(f"Total model params: {param_count}")
+    param_count = sum((p.numel() for n,p in model.named_parameters()))
+    if rank == 0 or args['verbose']:
+        print("Loading model", rank)
+    if rank == 0 and args['verbose']:
+        print(f"Total model params: {param_count}")
 
-        n_workers = 8
-        if rank == 0 and args['verbose']:
-            print(f"Using n_workers: {n_workers} for loading")
+    n_workers = 1
+    if rank == 0 and args['verbose']:
+        print(f"Using n_workers: {n_workers} for loading")
 
-        start = time.time()
-        for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
-            weights = safetensors.torch.load_file(filename)
-            parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
-                     model=model, 
-                     dtype=torch_dtype, 
-                     device=local_rank, 
-                     skip_names=load_param_skip_names,
-                     to_cpu=(args["low_memory"] and rank==0), 
-                     to_meta=(args["low_memory"] and rank!=0),
-                     verbose=args["verbose"])
-        if rank == 0 and args["verbose"]:
-            print(f"Loaded model weights in {time.time()-start:.3f} seconds")
-        torch.cuda.empty_cache() # cleanup any extra memory usage from parallel loading.
+    start = time.time()
+    for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
+        weights = safetensors.torch.load_file(filename)
         
+        ### DEBUG ###
+        # remove all other layers but first.
+        weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
+        if len(weights) == 0:
+            continue
+        ### DEBUG END ###
+        
+        parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
+                    model=model, 
+                    dtype=torch_dtype, 
+                    device=local_rank, 
+                    skip_names=load_param_skip_names,
+                    to_cpu=(args["low_memory"] and rank==0), 
+                    to_meta=(args["low_memory"] and rank!=0),
+                    verbose=args["verbose"])
+    if rank == 0 and args["verbose"]:
+        print(f"Loaded model weights in {time.time()-start:.3f} seconds")
+    torch.cuda.empty_cache() # cleanup any extra memory usage from parallel loading.
+    
     if rank == 0 or args['verbose']:
         print(f"Rank {rank}: Model created: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
     

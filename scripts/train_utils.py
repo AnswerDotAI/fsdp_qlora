@@ -141,18 +141,18 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 def get_optimizer(model:nn.Module, args:Dict):
     """Returns an optimizer. We can add more options here if needed."""
     
-    if args['lora_plus_lambda'] is not None:
-        lora_B_lr = args['lr'] * args['lora_plus_lambda']
-        params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
-        for name, param in model.named_parameters():
-            if any(pattern in name for pattern in ('lora_B', 'lora_AB._fsdp_wrapped_module.1')):
-                if args['verbose']: print(f"Adding {name} to lora_B params")
-                params[1]['params'].append(param)
-            else:
-                if args['verbose']: print(f"Adding {name} to params")
-                params[0]['params'].append(param)
-    else:
-        params = model.parameters()
+    # if args['lora_plus_lambda'] is not None:
+    #     lora_B_lr = args['lr'] * args['lora_plus_lambda']
+    #     params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
+    #     for name, param in model.named_parameters():
+    #         if any(pattern in name for pattern in ('lora_B', 'lora_AB._fsdp_wrapped_module.1')):
+    #             if args['verbose']: print(f"Adding {name} to lora_B params")
+    #             params[1]['params'].append(param)
+    #         else:
+    #             if args['verbose']: print(f"Adding {name} to params")
+    #             params[0]['params'].append(param)
+    # else:
+    params = model.parameters()
         
     if args["optimizer"] == "adam":
         return optim.Adam(params, lr=args['lr'])
