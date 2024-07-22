@@ -141,7 +141,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg._attn_implementation = attn_impl
     
     ### DEBUG ###
-    cfg.num_hidden_layers = 1
+    # cfg.num_hidden_layers = 1
     ### DEBUG END ###
     
     # RoPE scaling.
@@ -265,12 +265,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
         weights = safetensors.torch.load_file(filename)
         
-        ### DEBUG ###
-        # remove all other layers but first.
-        weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
-        if len(weights) == 0:
-            continue
-        ### DEBUG END ###
+        # ### DEBUG ###
+        # # remove all other layers but first.
+        # weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
+        # if len(weights) == 0:
+        #     continue
+        # ### DEBUG END ###
         
         parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                     model=model, 
