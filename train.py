@@ -72,6 +72,53 @@ from scripts.quant_utils import replace_linear, load_and_quantize
 from scripts.train_utils import Logger, update_progress_bar, get_wrapping_policy, get_optimizer, get_lr_scheduler
 from scripts.dataset_utils import get_dataloader
 
+
+def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=None):
+    
+    if step is None:
+        output_dir = args["output_dir"]
+    else:
+        output_dir = os.path.join(args["output_dir"], f"step_{step}")
+    
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    dist.barrier()
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    if args["train_type"] in ["hqq_dora"]:
+        cpu_state_dict = {}
+        trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('dora_layer', 'magnitude_layer'))]
+        for prefix, module in trainable_fsdp_modules:
+            prefix = (prefix.replace("_fsdp_wrapped_module.", "")
+                            .replace("_checkpoint_wrapped_module.", "")
+                            .replace("_offload_wrapped_module.", "")
+                            .replace("_orig_mod.", ""))
+            if args['verbose']: print(f"Saving {prefix}")
+            with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
+                cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
+            dist.barrier()
+            torch.cuda.synchronize()
+            
+        if rank==0:
+            print("Saving trained LoRA weights.")
+            save_file(cpu_state_dict, os.path.join(output_dir, "model_state_dict.safetensors"))
+            print("Done", rank)
+            print("Saving model config as json.")
+
+            # Save QLoRA config.
+            qlora_config_dict = {}
+            qlora_config_dict["lora_target_modules"] = args["lora_target_modules"]
+            qlora_config_dict["compute_dtype"]       = str(compute_dtype).split(".")[-1]
+            qlora_config_dict["lora_rank"]           = args["lora_rank"]
+            qlora_config_dict["layer_nbits"]         = layer_nbits
+            qlora_config_dict["layer_groupsizes"]    = layer_groupsizes
+
+            model_config_filename = os.path.join(output_dir, "config.json")
+            config_dict = cfg.to_dict()
+            config_dict["qlora_config"] = qlora_config_dict
+            with open(model_config_filename, "w+") as f: 
+                json.dump(config_dict, f)    
+
     
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
@@ -254,11 +301,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     param_count = sum((p.numel() for n,p in model.named_parameters()))
     if rank == 0 or args['verbose']:
         print("Loading model", rank)
-    if rank == 0 and args['verbose']:
+        
+    if rank == 0 or args['verbose']:
         print(f"Total model params: {param_count}")
 
-    n_workers = 1
-    if rank == 0 and args['verbose']:
+    n_workers = 8
+    if rank == 0 or args['verbose']:
         print(f"Using n_workers: {n_workers} for loading")
 
     start = time.time()
@@ -287,10 +335,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if rank == 0 or args['verbose']:
         print(f"Rank {rank}: Model created: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
     
-    # Create DoRA layers and set trainable params.
-    print("Using HQQDORA", rank)
-    lora_cls = HQQDORA
+    if rank == 0 or args['verbose']:
+        # Create DoRA layers and set trainable params.
+        print("Using HQQDORA", rank)
     
+    lora_cls = HQQDORA
     for name, _ in model.named_modules():
         module_key, _, value_key = name.rpartition('.')
         if value_key in args['lora_target_modules']:
@@ -302,7 +351,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     for n,p in model.named_parameters():
         if any([lora_name in n for lora_name in ['lora_A', 'lora_B', 'magnitude']]):
             p.requires_grad = True
-            if args['verbose']:
+            if args['verbose'] and rank == 0:
                 print("Trainable DoRA layer", n)
         else:
             p.requires_grad = False
@@ -384,7 +433,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             print("Applying activation offloading", rank)
         model = offload_wrapper(model)
 
-    if rank == 0 and args['verbose']:
+    if rank == 0 or args['verbose']:
         print("Config:")
         print(cfg)
         print("Model:")
@@ -400,7 +449,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     lr_scheduler, num_training_steps = get_lr_scheduler(optimizer, dataloader, gradient_accumulation_steps, args)
 
     # Sanity check: see what parameters the optimizer has and which require grad:
-    if rank == 0 and args['verbose']:
+    if rank == 0 or args['verbose']:
         print("Optimizer params:")
         for group in optimizer.param_groups:
             for param in group['params']:
@@ -432,6 +481,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
+    current_training_step = 0
     # Reset peak memory to track that
     torch.cuda.reset_peak_memory_stats(local_rank)
     for epoch in range(args['num_epochs']):
@@ -508,6 +558,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 if lr_scheduler is not None:
                     lr_scheduler.step()
                 progress_bar.update(1)
+                current_training_step += 1
 
             # Log memory usage after backward
             if batch_idx == 0 and epoch == 0 and (rank == 0 or args['verbose']):
@@ -539,6 +590,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     if args["log_to"] == 'wandb':
                         logger.log({"loss": log_loss, "lr": log_lr}, rank)
                 ddp_loss = torch.zeros(2).to(local_rank)
+                                
+            # Save model every_n steps.
+            if accumulate_grads and args["save_model"] and (current_training_step % args["save_model_every_n_step"] == 0):
+                save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=current_training_step)
 
         # Print + log peak memory usage for the whole fourth step of training
         if epoch == 0 and (rank == 0 or args['verbose']):
@@ -578,44 +633,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # It might be better to just save the trained lora layers.
     # summon_full_params on lora layers and save.
     if args["save_model"]:
-        if rank == 0:
-            os.makedirs(args["output_dir"], exist_ok=True)
-        dist.barrier()
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if args["train_type"] in ["hqq_dora"]:
-            cpu_state_dict = {}
-            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('dora_layer', 'magnitude_layer'))]
-            for prefix, module in trainable_fsdp_modules:
-                prefix = (prefix.replace("_fsdp_wrapped_module.", "")
-                                .replace("_checkpoint_wrapped_module.", "")
-                                .replace("_offload_wrapped_module.", "")
-                                .replace("_orig_mod.", ""))
-                if args['verbose']: print(f"Saving {prefix}")
-                with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
-                    cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
-                dist.barrier()
-                torch.cuda.synchronize()
-                
-            if rank==0:
-                print("Saving trained LoRA weights.")
-                save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                print("Done", rank)
-                print("Saving model config as json.")
-
-                # Save QLoRA config.
-                qlora_config_dict = {}
-                qlora_config_dict["lora_target_modules"] = args["lora_target_modules"]
-                qlora_config_dict["compute_dtype"]       = str(compute_dtype).split(".")[-1]
-                qlora_config_dict["lora_rank"]           = args["lora_rank"]
-                qlora_config_dict["layer_nbits"]         = layer_nbits
-                qlora_config_dict["layer_groupsizes"]    = layer_groupsizes
-
-                model_config_filename = os.path.join(args["output_dir"], "config.json")
-                config_dict = cfg.to_dict()
-                config_dict["qlora_config"] = qlora_config_dict
-                with open(model_config_filename, "w+") as f: 
-                    json.dump(config_dict, f)
-       
+        save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=None)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
@@ -645,6 +663,7 @@ def main(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     model_files_dir: str = None, # Directory containing model files for testing custom model configs
     save_model: bool_arg = False, # Save the resulting model
+    save_model_every_n_step: int = 1000, # Save the model every n steps
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora

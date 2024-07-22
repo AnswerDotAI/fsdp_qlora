@@ -1,5 +1,15 @@
-# 4 X A100
+# GPU: 4 X A100
+# Effective BS: 32
 
+# find max bs with:
+# --dataset dummy \
+# --dataset_samples 64 \
+# --context_length 2048 \
+
+# actual training with:
+# --dataset /workspace/data/llama_large_mix_dataset_v0 \
+
+# HQQ-DoRA 4bit training.
 cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
 --nbits 4 \
@@ -14,11 +24,12 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --use_cpu_offload false \
 --use_activation_cpu_offload false \
 --log_to stdout \
---verbose true \
---project_name "fsdp-quantized-large-llama-ft-exps" \
 --save_model true \
---output_dir /workspace/models/llama-3-70b-instruct-hqq-4bit 2>&1 | tee large_llama_70b_hqq_4bit.log
+--save_model_every_n_step 500 \
+--output_dir /workspace/models/llama-3-70b-instruct-hqq-4bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_70b_hqq_4bit.log
 
+
+# HQQ-DoRA 4/2 mixed bit training.
 cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
 --nbits mixed \
@@ -33,11 +44,12 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --use_cpu_offload false \
 --use_activation_cpu_offload false \
 --log_to stdout \
---verbose true \
---project_name "fsdp-quantized-large-llama-ft-exps" \
 --save_model true \
---output_dir /workspace/models/llama-3-70b-instruct-hqq-mixed-bit 2>&1 | tee large_llama_70b_hqq_mixed_bit.log
+--save_model_every_n_step 500 \
+--output_dir /workspace/models/llama-3-70b-instruct-hqq-mixed-bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_70b_hqq_mixed_bit.log
 
+
+# HQQ-DoRA 2 mixed bit training.
 cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
 --nbits 2 \
@@ -52,7 +64,6 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --use_cpu_offload false \
 --use_activation_cpu_offload false \
 --log_to stdout \
---verbose true \
---project_name "fsdp-quantized-large-llama-ft-exps" \
 --save_model true \
---output_dir /workspace/models/llama-3-70b-instruct-hqq-2bit 2>&1 | tee large_llama_70b_hqq_2bit.log
+--save_model_every_n_step 500 \
+--output_dir /workspace/models/llama-3-70b-instruct-hqq-2bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_70b_hqq_2bit.log
