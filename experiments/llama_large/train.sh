@@ -59,22 +59,22 @@
 # --save_model true \
 # --output_dir /workspace/models/llama-3-8b-instruct-hqq-dora-plus-plus 2>&1 | tee large_llama_configB.log
 
-# # test config C
-cd /workspace/git/fsdp_qlora && python train.py \
---train_type hqq_dora \
---model_name meta-llama/Meta-Llama-3-8B-Instruct \
---model_files_dir /workspace/models/meta-llama/Meta-Llama-3-400B-Instruct-C \
---dataset dummy \
---batch_size 1 \
---context_length 1024 \
---gradient_accumulation_steps 2 \
---sharding_strategy full_shard \
---use_gradient_checkpointing true \
---reentrant_checkpointing false \
---use_cpu_offload false \
---use_activation_cpu_offload false \
---log_to stdout \
---verbose true \
---project_name "fsdp-quantized-large-llama-ft-exps" \
---save_model true \
---output_dir /workspace/models/llama-3-8b-instruct-hqq-dora-plus-plus 2>&1 | tee large_llama_configB.log
+# # # test config C
+# cd /workspace/git/fsdp_qlora && python train.py \
+# --train_type hqq_dora \
+# --model_name meta-llama/Meta-Llama-3-8B-Instruct \
+# --model_files_dir /workspace/models/meta-llama/Meta-Llama-3-400B-Instruct-C \
+# --dataset dummy \
+# --batch_size 1 \
+# --context_length 1024 \
+# --gradient_accumulation_steps 2 \
+# --sharding_strategy full_shard \
+# --use_gradient_checkpointing true \
+# --reentrant_checkpointing false \
+# --use_cpu_offload false \
+# --use_activation_cpu_offload false \
+# --log_to stdout \
+# --verbose true \
+# --project_name "fsdp-quantized-large-llama-ft-exps" \
+# --save_model true \
+# --output_dir /workspace/models/llama-3-8b-instruct-hqq-dora-plus-plus 2>&1 | tee large_llama_configC.log
