@@ -174,8 +174,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Set up dataloader
     dataloader = get_dataloader(tokenizer, args)
 
-    attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
-    # attn_impl = "flash_attention_2"
+    # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
+    attn_impl = "flash_attention_2"
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
         
@@ -383,7 +383,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
     else:
         raise ValueError("Invalid FSDP sharding strategy")
-
+    
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
