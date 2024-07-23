@@ -23,6 +23,11 @@ from hqq.backends.torchao import patch_hqq_to_aoint4
 import bitblas
 from bitblas.cache import global_operator_cache, get_database_path
 from bitblas.module import BITBLAS_TARGET, BITBLAS_DATABASE_PATH
+
+from transformers.utils import logging
+logging.set_verbosity_info()
+logger = logging.get_logger()
+
 BITBLAS_DATABASE_PATH = "/workspace/.cache/bitblas"
 BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
 def _get_or_create_bitblas_operator(config):
@@ -36,19 +41,16 @@ def _get_or_create_bitblas_operator(config):
         # bitblas_matmul.hardware_aware_finetune(topk=20)
         global_operator_cache.add(config, bitblas_matmul)
         global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
-        print("BitBLAS Tuning done, appended operator to global_operator_cache.")
+        logger.info("BitBLAS Tuning done, appended operator to global_operator_cache.")
     else:
-        print("BitBLAS Operator found in global_operator_cache.")
+        logger.info("BitBLAS Operator found in global_operator_cache.")
     return bitblas_matmul
 
-from transformers.utils import logging
-logging.set_verbosity_info()
-logger = logging.get_logger()
 
 @call_parse()
 def main(
-    train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # Which merge strategy to use for inference.
-    infer_type: Param("", choices=["tinygemm", "bitblas"]) = "tinygemm", # Which merge strategy to use for inference.
+    train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # Which quantization strategy to use for inference.
+    infer_type: Param("", choices=["tinygemm", "bitblas"]) = "tinygemm", # Which kernel strategy to use for inference.
     dora_safetensors_filename: str = None, # Used for lora/dora inference.
     config_filename: str = None, # Used to get quantization config, might have been saved after training.
     model_name: str = "meta-llama/Llama-2-7b-hf", 
