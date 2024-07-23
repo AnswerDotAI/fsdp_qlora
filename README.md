@@ -46,7 +46,13 @@ pip install flash-attn --no-build-isolation # faster than sdpa
 
 ### Train
 
-Use `fsdp_qlora/experiments/llama_large/llama_[70b|405b].sh` to train the models.
+Use 
+
+```bash
+sh fsdp_qlora/experiments/llama_large/llama_[70b|405b].sh
+```
+
+to train the models.
 
 Some ideas to try:
 
@@ -59,7 +65,11 @@ Approx 5 mins (llama70b) and 20-30 mins (llama405b) to load and quantize model w
 ### Upload DoRA model weights and model configs.
 
 1. Create a HF model repo, for example answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA.
-2. Upload with `huggingface-cli upload answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA llama-3-70b-instruct-hqq-4bit/`
+2. Upload with 
+
+```bash
+huggingface-cli upload answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA llama-3-70b-instruct-hqq-4bit/
+```
 
 
 
@@ -126,7 +136,7 @@ Example: https://github.com/AnswerDotAI/kerem_research/blob/main/inference_bench
 
 ### Evaluation benchmarks
 
-TODO: Add MLMMLU and human eval prompts with lmsys-1m.
+**TODO:** Add MLMMLU and human eval prompts with lmsys-1m.
 
 Script: https://github.com/AnswerDotAI/kerem_research/blob/main/evaluation_benchmarking/eval.py
 
