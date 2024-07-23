@@ -266,7 +266,7 @@ def main(
     with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
     
     # save model config.
-    model_config = AutoConfig.from_pretrained(MODEL_NAME)
+    model_config = AutoConfig.from_pretrained(MODEL_NAME).to_dict()
     # save model config
     model_config['rope_scaling'] = {"type" :"dynamic", "factor": 2.0}
     model_config_filename = save_dir/"config.json"
