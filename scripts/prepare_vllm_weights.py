@@ -55,7 +55,7 @@ def main(
     config_filename: str = None, # Used to get quantization config, might have been saved after training.
     model_name: str = "meta-llama/Llama-2-7b-hf", 
     save_dir: str = "/workspace/models/llama-7b-orca-math-100k-full-quantized",
-    dtype: str = "bfloat16", # Only used when config file doesn't have this info.
+    dtype: str = None, # Only used when config file doesn't have this info.
     nbits: int = None, # Only used when config file doesn't have this info.
     groupsize: int = None, # Only used when config file doesn't have this info.
 ):
@@ -69,7 +69,7 @@ def main(
     save_dir = Path(args["save_dir"])
     os.makedirs(save_dir, exist_ok=True)
 
-    config_dict = json.load(open(args["config_filename"])) if args["config_filename"] else {}
+    config_dict = json.load(open(args["config_filename"]))["qlora_config"] if args["config_filename"] else {}
 
     if "lora_target_modules" not in config_dict:
         logger.info(f"Using default lora layers for quantization: {DEFAULT_LORA_TARGET_LAYERS}")
@@ -117,7 +117,7 @@ def main(
         raise ValueError("Gate and up layers must have same group size.")
     
     
-    dtype = getattr(torch, config_dict.get("compute_dtype", args["dtype"]))
+    dtype = getattr(torch, config_dict.get("compute_dtype", "bfloat16"))
     lora_rank = config_dict.get("lora_rank", 64)
     
     MODEL_NAME = args["model_name"]
@@ -132,9 +132,14 @@ def main(
     # Need to cast to half for bitblas.
     bitblas_dtype = torch.half
    
-    quantized_state_dict = {}
+    # TODO: Separate quantized weights (one time prep) and lora weights.
+    # Save quantized weights for a given config only once.
+    # VLLM requires a single directory to have all the files. How to share quantized weights across different directories with different lora weights?
     for filename in pretrained_files:
+        file_shard_name = Path(filename).name
         pretrained_weights = safetensors.torch.load_file(filename)
+        quantized_state_dict = {}
+        print(f"Preparing weights for {file_shard_name}")
         for n,p in tqdm(iter(pretrained_weights.items())):
             if "inv_freq" in n: continue
             p = p.to(dtype)
@@ -156,12 +161,13 @@ def main(
                 m = torch.nn.Linear(*p.T.shape, bias=False)
                 m.weight.data.copy_(p)
                 hqq_linear = HQQLinear(m, quant_config, compute_dtype=dtype)
+                W_est = hqq_linear.dequantize()
 
                 # Tinygemm weights.
                 if args["infer_type"] == "tinygemm":
-                    patched_hqq_linear = patch_hqq_to_aoint4(hqq_linear, None)
+                    patched_hqq_linear = patch_hqq_to_aoint4(hqq_linear, None) # patching deletes `hqq_linear.W_q`.
                     quantized_state_dict[n.replace(".weight", ".qweight")] = patched_hqq_linear.weight_int4pack
-                    quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros
+                    quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros         
                 # Bitblas weights.
                 elif args["infer_type"] == "bitblas":
                     W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
@@ -200,11 +206,12 @@ def main(
                     raise ValueError("Invalid inference type.")
 
                 # DoRA weights.
-                lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")]
-                lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")]
+                lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
+                lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
                 m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
-                w = hqq_linear.dequantize().cpu()
-                rescale = m / (w + lora_b @ lora_a).norm(p=2, dim=1).detach()
+                rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
+                lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
+                del W_est; torch.cuda.empty_cache()
                 if args["infer_type"] == "bitblas":
                     lora_a = lora_a.to(bitblas_dtype)
                     lora_b = lora_b.to(bitblas_dtype)
@@ -214,13 +221,12 @@ def main(
                 quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
             else:
                 quantized_state_dict[n] = p
-                
-                
-    # Save quantized state_dict.
-    quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
-    save_dir = Path(args["save_dir"])
-    os.makedirs(save_dir, exist_ok=True)    
-    safetensors.torch.save_file(quantized_state_dict, save_dir/"model_state_dict.safetensors")
+
+        # Save quantized state_dict.
+        quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
+        save_dir = Path(args["save_dir"])
+        os.makedirs(save_dir, exist_ok=True)    
+        safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}")
                 
     # save vLLM quant config.
     if infer_type["tinygemm"]:
@@ -245,7 +251,6 @@ def main(
             
     quant_config_filename = save_dir/"quantize_config.json"
     with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
-    
     
     # save model config.
     model_config = AutoConfig.from_pretrained(MODEL_NAME)
