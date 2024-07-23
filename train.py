@@ -187,9 +187,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg.use_cache = False
     cfg._attn_implementation = attn_impl
     
-    ### DEBUG ###
+    # ## DEBUG ###
     # cfg.num_hidden_layers = 1
-    ### DEBUG END ###
+    # ## DEBUG END ###
     
     # RoPE scaling.
     if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):

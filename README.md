@@ -1,322 +1,133 @@
-# fsdp_qlora
+# Llama 405B training
 
-Training LLMs with Quantized LoRA + FSDP.
+This branch focuses on training quantized Llama3.1-405B with QDoRA. Currently using HQQ.
 
-Read our [announcement blog post](https://www.answer.ai/posts/2024-03-06-fsdp-qlora.html).
+## System Setup
 
-You should treat this script as an alpha/preview release. If you’re not comfortable with testing and debugging models, we’d suggest holding off for a few months while the community more fully tests the approach.
-
-## Integrations
-
-FSDP+QLoRA has been integrated into:
-- [Axolotl](https://github.com/OpenAccess-AI-Collective/axolotl/pull/1378): experimental support
-
-## Installation
-
-The following steps should work (tested on Cuda 11.7, 11.8 and 12.1):
-- Clone https://github.com/AnswerDotAI/fsdp_qlora
-- `pip install llama-recipes fastcore "transformers!=4.38.*,!=4.39.*" --extra-index-url https://download.pytorch.org/whl/test/cu118` as an easy way to get most dependencies (replace 118 with your desired Cuda version)
-- Install bitsandbytes `pip install bitsandbytes>=0.43.0`
-- Run `huggingface-cli login` (to access Llama 2)
-- Optional Libraries:
-  - HQQ quantization: follow the HQQ installation [instructions](https://github.com/mobiusml/hqq?tab=readme-ov-file#installation). Our training script uses `HQQBackend.ATEN_BACKPROP`, so also make sure to build the custom kernels `cd hqq/kernels && python setup_cuda.py install`. Pin commit to `72b2b641aadc44a7ded6b243915f90df3b3be385` for FSDP compatibility, until `to_empty()` method is fixed. 
-  - Weights and Biases logging: `pip install wandb`
-- [Pytorch >= 2.2](https://pytorch.org/blog/pytorch2-2/) is recommended to make use of the native flash-attention 2 kernel.
-
-## Finetune Llama-2 70B on Dual 24GB GPUs
-
-Once installed, run `cd fsdp_qlora` and then run the following command to begin finetuning Llama-2 70B on [Alpaca](https://huggingface.co/datasets/yahma/alpaca-cleaned) at a maximum sequence length of 512 tokens.
+System requirements (used in runpod which is a docker env with `/workspace` as the shared volume mount):
 
 ```bash
-python train.py \
---model_name meta-llama/Llama-2-70b-hf \
---batch_size 2 \
---context_length 512 \
---precision bf16 \
---train_type qlora \
---use_gradient_checkpointing true \
---use_cpu_offload true \
---dataset alpaca \
---reentrant_checkpointing true
+apt-get update
+apt-get install -y tmux vim htop jq
+
+mkdir -p /workspace/.cache/huggingface
+ln -s /workspace/.cache/huggingface ~/.cache/huggingface # place HF token in /workspace/.cache/huggingface/token
 ```
 
-This example command currently uses just over 128GB of CPU RAM. If you only have 128GB available, we recommend making a 10-20GB swap file to accommodate the initial spike in usage.
+## Training
 
-## Training Options
 
-For quantization we support HQQ and bitsandbytes. We're currently doing benchmarking to help you decide which to use. If you do use bitsandbytes, be sure to pass `--reentrant_checkpointing True` to avoid triggering a bug in bitsandbytes which results in high memory usage (a fix is in progress).
+**NOTE:** Fast inference kernels require axis=1 quantization and axis=1 quantization in HQQ requires the slower `HQQBackend.PYTORCH_BACKPROP` backend. 
 
-### `--train_type full`
+- This causes slower training times compared to using `HQQBackend.ATEN_BACKPROP` with axis=0.
+- `torch.compile` not faster.
+- **TODO:** Data packing, preemtible training (just need to add resume option with path to checkpoint) with Skypilot + Spot VMs.
 
-Full params fine-tuning.
+### Create new virtual environment
 
 ```bash
-export CUDA_VISIBLE_DEVICES=4,5 # optionally set devices
-python train.py \
---world_size 2 \ # optional, on a single machine will be set automatically
---master_port 12356 \ # optional, defaults to 12355
---model_name meta-llama/Llama-2-7b-hf \
---gradient_accumulation_steps 4 \
---batch_size 8 \
---context_length 512 \
---precision bf16 \
---train_type full \
---use_gradient_checkpointing true \
---use_cpu_offload false \
---use_activation_cpu_offload false \
---log_to wandb \
---dataset alpaca
+python -m venv /workspace/py_venvs/qdora
+source /workspace/py_venvs/qdora/bin/activate
 ```
 
-### `--train_type lora`
-
-LoRA fine-tuning using HF PEFT library.
-
-```diff
-- --train_type full \
-+ --train_type lora \
-```
-
-### `--train_type custom_lora`
-
-LoRA fine-tuning using a custom LoRA module.
-
-```diff
-- --train_type full \
-+ --train_type custom_lora \
-```
-
-### `--train_type qlora`
-
-4-bit quantized LoRA fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization and HF PEFT library.
-
-```diff
-- --train_type full \
-+ --train_type qlora \
-+ --reentrant_checkpointing true \
-```
-
-### `--train_type custom_qlora`
-
-4-bit quantized LoRA fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization and a custom LoRA module.
-
-```diff
-- --train_type full \
-+ --train_type custom_qlora \
-+ --reentrant_checkpointing true \
-```
-
-### `--train_type hqq_lora`
-
-4-bit quantized LoRA fine-tuning using HQQ library and a custom LoRA module.
-
-```diff
-- --train_type full \
-+ --train_type hqq_lora \
-```
-
-### `--train_type bnb_dora`
-
-4-bit quantized DoRA fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization and a custom DoRA module.
-
-```diff
-- --train_type full \
-+ --train_type bnb_dora \
-```
-
-### `--train_type hqq_dora`
-
-4-bit quantized DoRA fine-tuning using HQQ library and a custom DoRA module.
-
-```diff
-- --train_type full \
-+ --train_type hqq_dora \
-```
-
-### `--train_type bnb_llama_pro`
-
-4-bit quantized Llama-Pro fine-tuning using bitsanbytes Linear4bit layer with NF4 quantization.
-
-To create llama-pro weights, run the following command:
+### FSDP QDoRA branch
 
 ```bash
-python scripts/block_expansion.py \
---model_name meta-llama/Llama-2-7b-hf \
---output_dir /path/to/llama_pro_weights_directory \
---expansion_rate 0.1
+git clone https://github.com/AnswerDotAI/fsdp_qlora.git
+git switch llama400b
+
+pip install torch transformers datasets accelerate fastcore hqq wheel setuptools
+pip install flash-attn --no-build-isolation # faster than sdpa
 ```
 
-```diff
-- --train_type full \
-+ --train_type bnb_llama_pro \
-+ --llama_pro_path /path/to/llama_pro_weights_directory \
-```
+1. Donwload model weights before training. Use `fsdp_qlora/experiments/llama_large/llama_70b.ipynb` to download the weights. Approx 7-8 mins to download for llama-70b.
 
-### `--train_type hqq_llama_pro`
+2. Prepare instruction tuning data mixture. Use `fsdp_qlora/experiments/llama_large/prepare_data_mix.ipynb` to prepare the data.
 
-4-bit quantized Llama-Pro fine-tuning using HQQ library.
+### Train
 
-To create llama-pro weights, run the following command:
+Use `fsdp_qlora/experiments/llama_large/llama_[70b|405b].sh` to train the models.
+
+Some ideas to try:
+
+1. Different data mixture and/or sampling.
+2. Different hyperparameters: lora rank, lr sched, lr.
+
+Approx 5 mins (llama70b) and 20-30 mins (llama405b) to load and quantize model weights during training.
+
+
+### Upload DoRA model weights and model configs.
+
+1. Create a HF model repo, for example answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA.
+2. Upload with `huggingface-cli upload answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA llama-3-70b-instruct-hqq-4bit/`
+
+
+
+## Inference
+
+### Create new virtual environment
 
 ```bash
-python scripts/block_expansion.py \
---model_name meta-llama/Llama-2-7b-hf \
---output_dir /path/to/llama_pro_weights_directory \
---expansion_rate 0.1
+python -m venv /workspace/py_venvs/vllm
+source /workspace/py_venvs/vllm/bin/activate
 ```
 
-```diff
-- --train_type full \
-+ --train_type hqq_llama_pro \
-+ --llama_pro_path /path/to/llama_pro_weights_directory \
-```
-
-## Low Memory Loading
-
-During quantized LoRA training we use a custom quantization and loading code to avoid loading the entire model into GPU memory before sharding it across GPUs. This is the default behavior of our training script when any of the following training options `"qlora", "custom_qlora", "hqq_lora"` is used. Other training options are already optimized for low memory loading to their best extent.
-
-We load the weights iteratively, quantize them on the GPU and place them back to CPU or meta device (based on their rank) concurrently a few layers at a time. We do this across all GPUs to initialize the quantization parameters, such as zero and scale, while using `sync_module_states=True` to sync the model parameters and buffers across all GPUs during FSDP initialization.
-
-## Mixed Precision Training
-
-### `--precision bf16` (pure bfloat16)
-
-This will cast all the model parameters to `torch.bfloat16` before training and won't use FSDP mixed precision. As a result, sharded and unsharded params will be stored in bf16, forward and backward passes will be done in bf16, and gradient reduction and updates will be done in bf16.
-
-### `--precision fp32` (pure float32)
-
-This will cast all the model parameters to `torch.float32` before training and won't use FSDP mixed precision. As a result, sharded and unsharded params will be stored in fp32, forward and backward passes will be done in fp32, and gradient reduction and updates will be done in fp32.
-
-
-### `--precision mp_fp16_autocast` (mixed float16 with autocast)
-
-This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with
-
-```
-mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-```
-
-As a results, sharded and unsharded params will be stored in fp32. It will use `autocast(torch.float16)` for forward and backward passes, and `autocast(torch.float16)` for gradient reduction and updates.
-
-
-### `--precision mp_bf16_autocast` (mixed bfloat16 with autocast)
-
-This will cast all the model parameters to `torch.float32` before training and will use FSDP mixed precision with
-
-```
-mp_policy = MixedPrecision(param_dtype=torch.float32, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-```
-
-As a results, sharded and unsharded params will be stored in fp32. It will use `autocast(torch.bfloat16)` for forward and backward passes, and `autocast(torch.bfloat16)` for gradient reduction and updates.
-
-
-### `--precision mp_bf16_buffers_autocast` (bfloat16 params and float32 buffers with autocast)
-
-This will cast all the model parameters to `torch.bfloat16` before training but will keep the buffers in `torch.float32` and will use FSDP mixed precision with
-
-```
-mp_policy = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16, buffer_dtype=torch.float32)
-```
-
-As a results, sharded and unsharded params will be stored in bf16. It will use `autocast(torch.bfloat16)` for forward and backward passes, and `autocast(torch.bfloat16)` for gradient reduction and updates. Buffers and only [eligible operations](https://pytorch.org/docs/stable/amp.html#cuda-ops-that-can-autocast-to-float16) in autocast will be performed in bf16.
-
-This option is important for RoPE layer which gives incorrect results when cast to lower precision especially with longer context lengths.
-
-## Comparison to an existing trainer
-
-![Screenshot 2024-02-01 083222](https://github.com/AnswerDotAI/fsdp_qlora/assets/6575163/97bb03fb-c2bb-4679-83ff-63a2e202826f)
-`hf_train.py` uses TRL's SFTTrainer for a comparison run. To match with our script, modify the dataloading code to train on everything (not just completions) and then run `train.py --train_type qlora --dataset guanaco --batch_size 8 --lr_scheduler cosine --log_to wandb --save_model True --output_dir guanaco_7B --gradient_accumulation_steps 2 --lr 2e-4`. The SFTTrainer version has to run with a lower batch size (4 vs 8) so we only do 2 gradient accumulation steps vs 4 in the QLoRA+FSDP version.
-
-## Converting Saved Models
-
-If you specify `--save_model True` the adapter layers will be saved as a state dict. To convert to the regular Hugging Face format and upload to the hub, see: **Converting the State Dict.ipynb**
-
-If `"custom_qlora", "hqq_lora"` training options are used, then only the trainable LoRA parameters will be saved. Before inference, you need to load and quantize the base model again, and separately load the saved LoRA parameters.
-
-You can alternatively test to see if merging base model weights and trained LoRA weights and then quantizing them performs similar to keeping the parameters separately as done during training. To make use of `torch.compile` with HQQ, see https://github.com/mobiusml/hqq/issues/18.
-
-## Limitations
-
-While QLoRA finetuning works with FSDP, there are some rough edges to be aware of with this alpha release and our example script.
-
-First, the current release of Transformer `AutoModel.from_pretrained` cannot be used to load models into quantized weights, as it does not support the new quant_storage or quantization flag. Loading pretrained models requires writing or using custom model loading code. We provide an example of how to load and quantize a QLoRA model for finetuning in our demo script.
-
-We are actively working with Hugging Face to resolve this incompatibility in future Transformers and PEFT releases.
-
-Second, while FSDP’s Mixed Precision works with QLoRA, practitioners need to be careful to set the `MixedPrecision.param_type` to match the `Linear4Bit.quant_storage` dtype. Otherwise, FSDP’s Mixed Precision could cast the quantized weights to a different precision, essentially turning them into random weights. Our example script shows how to avoid this potential pitfall, and we will be happy to assist model training libraries in correctly exposing FSDP’s Mixed Precision options to users when training with QLoRA
-
-## Example: Llama 70B 4-A100 40GB Training
+Before any other installation build the vllm fork branch locally (takes a while) - this also installs torch.
 
 ```bash
-# BnB QLoRA
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-python train.py \
---world_size 4 \
---master_port 12356 \
---model_name meta-llama/Llama-2-70b-hf \
---gradient_accumulation_steps 4 \
---batch_size 2 \
---context_length 512 \
---precision bf16_buffers_autocast \
---train_type custom_qlora \
---use_gradient_checkpointing true \
---reentrant_checkpointing true
---use_cpu_offload false \
---log_to stdout \
---dataset alpaca
-
-# HQQ QLoRA
-export CUDA_VISIBLE_DEVICES=4,5,6,7
-python train.py \
---world_size 4 \
---master_port 12356 \
---model_name meta-llama/Llama-2-70b-hf \
---gradient_accumulation_steps 4 \
---batch_size 2 \
---context_length 512 \
---precision bf16_buffers_autocast \
---train_type hqq_lora \
---use_gradient_checkpointing true \
---use_cpu_offload false \
---log_to stdout \
---dataset alpaca
+git clone https://github.com/AnswerDotAI/vllm
+cd vllm && git switch torchao && pip install -e .
 ```
 
-**Note:** For large batch size or long context training HQQ LoRA is a bit more memory efficient compared to BnB LoRA with re-entrant checkpointing. So if you are running into OOM issues, try using HQQ LoRA.
+Build torchao locally (which has the fused tinygemm dequant kernel)
 
-
-## SLURM Training
-
-See `fsdp_multi_node.sh` for an example training script using multi-node training with SLURM.
-
-## Add support for a new model
-
-First, import the new model's transformer, attention, and MLP layers from Transformers:
-
-```python
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
+```bash
+git clone https://github.com/pytorch/ao.git
+cd ao && python setup.py install
 ```
 
-Then in the `get_wrapping_policy` function, add the attention, MLP, and transformer layers to the `self_attn_policy_fn`, `mlp_policy_fn`, and `transformer_wrap_policy` wrapping policy methods:
+VLLM model prep utils.
 
-```python
-def get_wrapping_policy(custom_policy:bool=False):
-
-    def self_attn_policy_fn(module):
-        return isinstance(module, tuple(*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values()))
-
-    def mlp_policy_fn(module):
-        return isinstance(module, (LlamaMLP, MistralMLP))
-
-    transformer_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
-    )
+```bash
+git clone https://github.com/AnswerDotAI/fsdp_qlora.git
+cd fsdp_qlora && git switch llama400b
 ```
 
-Finally, add gradient checkpointing support by adding the transformer layer to `check_fn`:
+Quantization and utils (hqq comes with bitblas)
 
-```python
-if args["use_gradient_checkpointing"]:
-    check_fn = lambda submodule: isinstance(submodule, (LlamaDecoderLayer, MistralDecoderLayer))
+```bash
+pip install fastcore hqq
 ```
+
+### Model Download
+
+Download the model weights and configs.
+
+```bash
+huggingface-cli download answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA --local-dir ./Meta-Llama-3-70B-Instruct-4bit-DoRA
+```
+
+### vLLM Model Prep
+
+Prepare vLLM weights. (takes a while). TODO: quantize once and share the weights, (but VLLM expects all the weights in the same directory).
+
+```bash
+sh /workspace/git/fsdp_qlora/experiments/llama_large/prepare_vllm_weights.sh
+```
+
+Inference benchmarking and evaluation.
+
+### Latency and throughput benchmarks
+
+Script: https://github.com/AnswerDotAI/kerem_research/blob/main/inference_benchmarking/benchmark.py
+
+Example: https://github.com/AnswerDotAI/kerem_research/blob/main/inference_benchmarking/benchmark.sh
+
+
+### Evaluation benchmarks
+
+TODO: Add MLMMLU and human eval prompts with lmsys-1m.
+
+Script: https://github.com/AnswerDotAI/kerem_research/blob/main/evaluation_benchmarking/eval.py
+
+Example: https://github.com/AnswerDotAI/kerem_research/blob/main/evaluation_benchmarking/eval.sh
