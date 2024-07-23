@@ -15,6 +15,8 @@ from glob import glob
 from transformers import AutoConfig
 from transformers.utils import hub, SAFE_WEIGHTS_NAME, SAFE_WEIGHTS_INDEX_NAME
 from fastcore.script import *
+from fastcore.parallel import parallel
+import functools
 import torch
 
 from hqq.core.quantize import HQQLinear, BaseQuantizeConfig, Quantizer
@@ -45,6 +47,102 @@ def _get_or_create_bitblas_operator(config):
     else:
         logger.info("BitBLAS Operator found in global_operator_cache.")
     return bitblas_matmul
+
+
+def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes, dtype, bitblas_dtype, args, dora_weights):
+    
+    file_shard_name = Path(filename).name
+    pretrained_weights = safetensors.torch.load_file(filename)
+    quantized_state_dict = {}
+    print(f"Preparing weights for {file_shard_name}")
+    for n,p in tqdm(iter(pretrained_weights.items())):
+        if "inv_freq" in n: continue
+        p = p.to(dtype)
+        if any(l in n for l in quantized_layers) and "weight" in n:
+            
+            NBITS = layer_nbits[n.split(".")[-2]]
+            GROUPSIZE = layer_groupsizes[n.split(".")[-2]]
+            
+            # Get layer-wise quant config.
+            quant_config = BaseQuantizeConfig(nbits=NBITS,
+                                                group_size=GROUPSIZE, 
+                                                quant_zero=False,
+                                                quant_scale=False,
+                                                offload_meta=False,
+                                                view_as_float=False, 
+                                                axis=1)
+    
+            # Prepare HQQ weights and quantize.
+            m = torch.nn.Linear(*p.T.shape, bias=False)
+            m.weight.data.copy_(p)
+            hqq_linear = HQQLinear(m, quant_config, compute_dtype=dtype)
+            W_est = hqq_linear.dequantize()
+
+            # Tinygemm weights.
+            if args["infer_type"] == "tinygemm":
+                patched_hqq_linear = patch_hqq_to_aoint4(hqq_linear, None) # patching deletes `hqq_linear.W_q`.
+                quantized_state_dict[n.replace(".weight", ".qweight")] = patched_hqq_linear.weight_int4pack
+                quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros         
+            # Bitblas weights.
+            elif args["infer_type"] == "bitblas":
+                W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
+                scale, zero, shape = hqq_linear.meta['scale'], hqq_linear.meta['zero'], hqq_linear.meta['shape']
+                scale = scale.to(bitblas_dtype)
+                zero = zero.to(bitblas_dtype)
+    
+                # BitBLAS engine.
+                print(f"Tuning BitBLAS for {hqq_linear.in_features}x{hqq_linear.out_features}")
+                matmul_config = bitblas.MatmulConfig(M=BITBLAS_OPT_M,
+                                                        N=hqq_linear.out_features,
+                                                        K=hqq_linear.in_features,
+                                                        A_dtype="float16",  
+                                                        W_dtype="uint4",  
+                                                        accum_dtype="float16",  
+                                                        out_dtype="float16",  
+                                                        layout="nt",  
+                                                        with_bias=False, 
+                                                        group_size=GROUPSIZE,
+                                                        with_scaling=True,  
+                                                        with_zeros=True,  
+                                                        zeros_mode="original",  
+                                                        #fast_decoding=True,
+                                                    )
+                matmul_eng_4bit = _get_or_create_bitblas_operator(matmul_config)		
+    
+                Wq_bitblas_4bit = matmul_eng_4bit.transform_weight(W_q_unpacked.reshape(shape))
+                meta_shape_bitblas = (hqq_linear.out_features, hqq_linear.in_features // GROUPSIZE)
+                scales_bitblas_4bit = scale.view(meta_shape_bitblas)
+                zeros_bitblas_4bit = zero.view(meta_shape_bitblas)
+
+                quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas_4bit
+                quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas_4bit
+                quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas_4bit
+            else:
+                raise ValueError("Invalid inference type.")
+
+            # DoRA weights.
+            lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
+            lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
+            m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
+            rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
+            lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
+            del W_est; torch.cuda.empty_cache()
+            if args["infer_type"] == "bitblas":
+                lora_a = lora_a.to(bitblas_dtype)
+                lora_b = lora_b.to(bitblas_dtype)
+                rescale = rescale.to(bitblas_dtype)
+            quantized_state_dict[n.replace(".weight", ".lora_A")] = lora_a
+            quantized_state_dict[n.replace(".weight", ".lora_B")] = lora_b
+            quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
+        else:
+            quantized_state_dict[n] = p
+
+    # Save quantized state_dict.
+    quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
+    save_dir = Path(args["save_dir"])
+    os.makedirs(save_dir, exist_ok=True)    
+    safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}")
+            
 
 
 @call_parse()
@@ -135,104 +233,19 @@ def main(
     # TODO: Separate quantized weights (one time prep) and lora weights.
     # Save quantized weights for a given config only once.
     # VLLM requires a single directory to have all the files. How to share quantized weights across different directories with different lora weights?
-    for filename in pretrained_files:
-        file_shard_name = Path(filename).name
-        pretrained_weights = safetensors.torch.load_file(filename)
-        quantized_state_dict = {}
-        print(f"Preparing weights for {file_shard_name}")
-        for n,p in tqdm(iter(pretrained_weights.items())):
-            if "inv_freq" in n: continue
-            p = p.to(dtype)
-            if any(l in n for l in quantized_layers) and "weight" in n:
-                
-                NBITS = layer_nbits[n.split(".")[-2]]
-                GROUPSIZE = layer_groupsizes[n.split(".")[-2]]
-                
-                # Get layer-wise quant config.
-                quant_config = BaseQuantizeConfig(nbits=NBITS,
-                                                    group_size=GROUPSIZE, 
-                                                    quant_zero=False,
-                                                    quant_scale=False,
-                                                    offload_meta=False,
-                                                    view_as_float=False, 
-                                                    axis=1)
-        
-                # Prepare HQQ weights and quantize.
-                m = torch.nn.Linear(*p.T.shape, bias=False)
-                m.weight.data.copy_(p)
-                hqq_linear = HQQLinear(m, quant_config, compute_dtype=dtype)
-                W_est = hqq_linear.dequantize()
+    n_workers = 8
+    quantize_and_save_parallel = functools.partial(quantize_and_save, 
+                                                   quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
+                                                   dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights)
+    parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
+    
 
-                # Tinygemm weights.
-                if args["infer_type"] == "tinygemm":
-                    patched_hqq_linear = patch_hqq_to_aoint4(hqq_linear, None) # patching deletes `hqq_linear.W_q`.
-                    quantized_state_dict[n.replace(".weight", ".qweight")] = patched_hqq_linear.weight_int4pack
-                    quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros         
-                # Bitblas weights.
-                elif args["infer_type"] == "bitblas":
-                    W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
-                    scale, zero, shape = hqq_linear.meta['scale'], hqq_linear.meta['zero'], hqq_linear.meta['shape']
-                    scale = scale.to(bitblas_dtype)
-                    zero = zero.to(bitblas_dtype)
-        
-                    # BitBLAS engine.
-                    print(f"Tuning BitBLAS for {hqq_linear.in_features}x{hqq_linear.out_features}")
-                    matmul_config = bitblas.MatmulConfig(M=BITBLAS_OPT_M,
-                                                            N=hqq_linear.out_features,
-                                                            K=hqq_linear.in_features,
-                                                            A_dtype="float16",  
-                                                            W_dtype="uint4",  
-                                                            accum_dtype="float16",  
-                                                            out_dtype="float16",  
-                                                            layout="nt",  
-                                                            with_bias=False, 
-                                                            group_size=GROUPSIZE,
-                                                            with_scaling=True,  
-                                                            with_zeros=True,  
-                                                            zeros_mode="original",  
-                                                            #fast_decoding=True,
-                                                        )
-                    matmul_eng_4bit = _get_or_create_bitblas_operator(matmul_config)		
-        
-                    Wq_bitblas_4bit = matmul_eng_4bit.transform_weight(W_q_unpacked.reshape(shape))
-                    meta_shape_bitblas = (hqq_linear.out_features, hqq_linear.in_features // GROUPSIZE)
-                    scales_bitblas_4bit = scale.view(meta_shape_bitblas)
-                    zeros_bitblas_4bit = zero.view(meta_shape_bitblas)
-
-                    quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas_4bit
-                    quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas_4bit
-                    quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas_4bit
-                else:
-                    raise ValueError("Invalid inference type.")
-
-                # DoRA weights.
-                lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
-                lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
-                m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
-                rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
-                lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
-                del W_est; torch.cuda.empty_cache()
-                if args["infer_type"] == "bitblas":
-                    lora_a = lora_a.to(bitblas_dtype)
-                    lora_b = lora_b.to(bitblas_dtype)
-                    rescale = rescale.to(bitblas_dtype)
-                quantized_state_dict[n.replace(".weight", ".lora_A")] = lora_a
-                quantized_state_dict[n.replace(".weight", ".lora_B")] = lora_b
-                quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
-            else:
-                quantized_state_dict[n] = p
-
-        # Save quantized state_dict.
-        quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
-        save_dir = Path(args["save_dir"])
-        os.makedirs(save_dir, exist_ok=True)    
-        safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}")
-                
     # save vLLM quant config.
-    if infer_type["tinygemm"]:
+    if args["infer_type"] == "tinygemm":
+        GROUPSIZE = layer_groupsizes["q_proj"]
         quant_config_dict = {"group_size" : GROUPSIZE, "inner_k_tiles" : 8, "lora_rank": lora_rank}
         
-    elif infer_type["bitblas"]:
+    elif args["infer_type"] == "bitblas":
         vllm_nbits 		 = {}
         vllm_group_sizes = {}
         if "gate_proj" in lora_layers:
