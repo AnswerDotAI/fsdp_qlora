@@ -14,10 +14,8 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
 --nbits 4 \
 --model_name meta-llama/Meta-Llama-3.1-405B-Instruct \
---dataset dummy \
---dataset_samples 64 \
---batch_size 1 \
---context_length 2048 \
+--dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
+--context_length 1024 \
 --gradient_accumulation_steps 4 \
 --sharding_strategy full_shard \
 --use_gradient_checkpointing true \
@@ -35,9 +33,9 @@ cd /workspace/git/fsdp_qlora && python train.py \
 # --train_type hqq_dora \
 # --nbits mixed \
 # --model_name meta-llama/Meta-Llama-3-70B-Instruct \
-# --dataset /workspace/data/llama_large_mix_dataset_v0 \
+# --dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
 # --batch_size 4 \
-# --context_length 2048 \
+# --context_length 1024 \
 # --gradient_accumulation_steps 2 \
 # --sharding_strategy full_shard \
 # --use_gradient_checkpointing true \
@@ -55,9 +53,9 @@ cd /workspace/git/fsdp_qlora && python train.py \
 # --train_type hqq_dora \
 # --nbits 2 \
 # --model_name meta-llama/Meta-Llama-3-70B-Instruct \
-# --dataset /workspace/data/llama_large_mix_dataset_v0 \
+# --dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
 # --batch_size 4 \
-# --context_length 2048 \
+# --context_length 1024 \
 # --gradient_accumulation_steps 2 \
 # --sharding_strategy full_shard \
 # --use_gradient_checkpointing true \
