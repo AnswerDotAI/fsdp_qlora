@@ -16,6 +16,7 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --model_name meta-llama/Meta-Llama-3.1-405B-Instruct \
 --dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
 --context_length 1024 \
+--batch_size 1 \
 --gradient_accumulation_steps 4 \
 --sharding_strategy full_shard \
 --use_gradient_checkpointing true \
@@ -32,11 +33,12 @@ cd /workspace/git/fsdp_qlora && python train.py \
 # cd /workspace/git/fsdp_qlora && python train.py \
 # --train_type hqq_dora \
 # --nbits mixed \
-# --model_name meta-llama/Meta-Llama-3-70B-Instruct \
+# --model_name meta-llama/Meta-Llama-3.1-405B-Instruct \
 # --dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
-# --batch_size 4 \
 # --context_length 1024 \
-# --gradient_accumulation_steps 2 \
+# --batch_size 1 \
+# --context_length 1024 \
+# --gradient_accumulation_steps 4 \
 # --sharding_strategy full_shard \
 # --use_gradient_checkpointing true \
 # --reentrant_checkpointing false \
@@ -44,19 +46,19 @@ cd /workspace/git/fsdp_qlora && python train.py \
 # --use_activation_cpu_offload false \
 # --log_to stdout \
 # --save_model true \
-# --save_model_every_n_step 500 \
-# --output_dir /workspace/models/llama-3-70b-instruct-hqq-mixed-bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_70b_hqq_mixed_bit.log
+# --save_model_every_n_step 250 \
+# --output_dir /workspace/models/llama-3-1-405b-instruct-hqq-mixed-bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_405b_hqq_mixed_bit.log
 
 
 # # HQQ-DoRA 2 mixed bit training.
 # cd /workspace/git/fsdp_qlora && python train.py \
 # --train_type hqq_dora \
 # --nbits 2 \
-# --model_name meta-llama/Meta-Llama-3-70B-Instruct \
+# --model_name meta-llama/Meta-Llama-3.1-405B-Instruct \
 # --dataset /workspace/data/llama_large_mix_dataset_v0_1024 \
-# --batch_size 4 \
 # --context_length 1024 \
-# --gradient_accumulation_steps 2 \
+# --batch_size 1 \
+# --gradient_accumulation_steps 4 \
 # --sharding_strategy full_shard \
 # --use_gradient_checkpointing true \
 # --reentrant_checkpointing false \
@@ -64,5 +66,5 @@ cd /workspace/git/fsdp_qlora && python train.py \
 # --use_activation_cpu_offload false \
 # --log_to stdout \
 # --save_model true \
-# --save_model_every_n_step 500 \
-# --output_dir /workspace/models/llama-3-70b-instruct-hqq-2bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_70b_hqq_2bit.log
+# --save_model_every_n_step 250 \
+# --output_dir /workspace/models/llama-3-1-405b-instruct-hqq-2bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_405b_hqq_2bit.log
