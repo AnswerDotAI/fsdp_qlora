@@ -171,8 +171,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     tokenizer = AutoTokenizer.from_pretrained(args["model_name"])
     tokenizer.pad_token_id = tokenizer.eos_token_id # TODO check if it exists first
 
-    # Set up dataloader
-    dataloader = get_dataloader(tokenizer, args)
+    # Set up dataloader, pad to nearest 128 for dynamic compilation.
+    dataloader = get_dataloader(tokenizer, args, pad_to_nearest=False)
 
     # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     attn_impl = "flash_attention_2"

@@ -80,7 +80,7 @@ class InstructionDataset(Dataset):
         }
 
 # And to get the dataloader
-def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
+def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=False):
     """Creates a dataset and appropriate dataloader with distributed sampler."""
     # Importing here rather than at the start to avoid multiprocessing issues
     from datasets import Dataset, load_dataset, load_from_disk
@@ -147,7 +147,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         
 
     # Collate function
-    def collate_fn(batch, with_attention_mask=False, pad_to_nearest=True, pad_to_context_length=False):
+    def collate_fn(batch, with_attention_mask=False, pad_to_nearest=pad_to_nearest, pad_to_context_length=False):
         # To list of tensors
         input_ids = [torch.tensor(item['input_ids']) for item in batch]
         attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
