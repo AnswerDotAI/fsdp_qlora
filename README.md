@@ -14,6 +14,9 @@ mkdir -p /workspace/.cache/huggingface
 ln -s /workspace/.cache/huggingface ~/.cache/huggingface # place HF token in /workspace/.cache/huggingface/token
 ```
 
+In azure attach a data disk to `/workspace` and mount it. ([attaching](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/attach-disk-portal))
+
+
 ## Training
 
 
@@ -40,7 +43,7 @@ pip install torch transformers datasets accelerate fastcore hqq wheel setuptools
 pip install flash-attn --no-build-isolation # faster than sdpa
 ```
 
-1. Donwload model weights before training. Use `fsdp_qlora/experiments/llama_large/llama_70b.ipynb` to download the weights. Approx 7-8 mins to download for llama-70b.
+1. Donwload model weights before training. Use `fsdp_qlora/experiments/llama_large/download_weights.py` to download the weights. Approx 7-8 mins to download for llama-70b.
 
 2. Prepare instruction tuning data mixture. Use `fsdp_qlora/experiments/llama_large/prepare_data_mix.ipynb` to prepare the data.
 
@@ -70,7 +73,6 @@ Approx 5 mins (llama70b) and 20-30 mins (llama405b) to load and quantize model w
 ```bash
 huggingface-cli upload answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA llama-3-70b-instruct-hqq-4bit/
 ```
-
 
 
 ## Inference
@@ -114,7 +116,9 @@ pip install fastcore hqq
 Download the model weights and configs.
 
 ```bash
-huggingface-cli download answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA --local-dir ./Meta-Llama-3-70B-Instruct-4bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-4bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-4bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-2bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-2bit-DoRA
 ```
 
 ### vLLM Model Prep
