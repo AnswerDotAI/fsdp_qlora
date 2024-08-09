@@ -136,6 +136,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     raise ValueError("Invalid inference type.")
 
             # DoRA weights.
+            # import pdb; pdb.set_trace()
             lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
             lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
             m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
@@ -258,6 +259,9 @@ def main(
     quantize_and_save_parallel = functools.partial(quantize_and_save, 
                                                    quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
                                                    dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights)
+    # for pretrained_file in pretrained_files:
+    #     quantize_and_save_parallel(pretrained_file)
+    
     parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
     
 

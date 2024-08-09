@@ -108,7 +108,7 @@ cd fsdp_qlora && git switch llama400b
 Quantization and utils (hqq comes with bitblas)
 
 ```bash
-pip install fastcore hqq
+pip install fastcore hqq openai
 ```
 
 ### Model Download
