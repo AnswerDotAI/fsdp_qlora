@@ -119,7 +119,33 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
             with open(model_config_filename, "w+") as f: 
                 json.dump(config_dict, f)    
 
+
+def save_optimizer(rank, model, optimizer, args, step=None):
     
+    if step is None:
+        output_dir = args["output_dir"]
+    else:
+        output_dir = os.path.join(args["output_dir"], f"step_{step}")
+    
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    dist.barrier()
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    if args["train_type"] in ["hqq_dora"]:        
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):    
+            optim_state_dict = FSDP.optim_state_dict(model, optimizer)
+            dist.barrier()
+            torch.cuda.synchronize()
+            
+        if rank==0:
+            print("Saving optimizer state.")
+            optimizer_filename = os.path.join(output_dir, "optimizer.bin")
+            torch.save(optim_state_dict, optimizer_filename)
+            print("Done", rank)
+            
+    
+
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Setup and initialize the process group
@@ -356,14 +382,21 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         else:
             p.requires_grad = False
     
+    if rank == 0 and args["resume_from_dora_weights"]:
+        # Load dora weights.
+        dora_weights = safetensors.torch.load_file(args["resume_from_dora_weights"])
+        for name, param in dora_weights.items():
+            model.load_state_dict({name: param}, strict=False)
+    
+    dist.barrier()
+    
     if rank == 0 or args['verbose']:
         print(f"Rank {rank}: DoRA layers added: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
 
                 
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank)
-        logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
-
+        logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)        
 
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(custom_policy=True, vanilla_policy=False)
@@ -443,6 +476,19 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Create the optimizer
     optimizer = get_optimizer(model, args)
+    
+    if args['resume_from_optimizer']:
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+            optim_state_dict = None
+            if rank == 0:
+                # Load optimizer state.
+                print("Loading optimizer state.")
+                optim_state_dict = torch.load(args["resume_from_optimizer"])
+            
+            flattened_osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=optim_state_dict)
+            optimizer.load_state_dict(flattened_osd)
+
 
     # LR scheduler.
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -594,6 +640,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Save model every_n steps.
             if accumulate_grads and args["save_model"] and (current_training_step % args["save_model_every_n_step"] == 0):
                 save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=current_training_step)
+                # save_optimizer(rank, model, optimizer, args, step=current_training_step)
 
         # Print + log peak memory usage for the whole fourth step of training
         if epoch == 0 and (rank == 0 or args['verbose']):
@@ -634,7 +681,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # summon_full_params on lora layers and save.
     if args["save_model"]:
         save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=None)
-
+        # save_optimizer(rank, model, optimizer, args, step=None)
+        
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
     # Clean up
@@ -664,6 +712,8 @@ def main(
     model_files_dir: str = None, # Directory containing model files for testing custom model configs
     save_model: bool_arg = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
+    resume_from_dora_weights: str = None, # Resume training from a checkpoint
+    resume_from_optimizer: str = None, # Resume training from a checkpoint
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora

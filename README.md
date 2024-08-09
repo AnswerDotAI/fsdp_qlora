@@ -7,8 +7,8 @@ This branch focuses on training quantized Llama3.1-405B with QDoRA. Currently us
 System requirements (used in runpod which is a docker env with `/workspace` as the shared volume mount):
 
 ```bash
-apt-get update
-apt-get install -y tmux vim htop jq
+sudo apt-get update
+sudo apt-get install -y tmux vim htop jq
 
 mkdir -p /workspace/.cache/huggingface
 ln -s /workspace/.cache/huggingface ~/.cache/huggingface # place HF token in /workspace/.cache/huggingface/token
@@ -16,6 +16,9 @@ ln -s /workspace/.cache/huggingface ~/.cache/huggingface # place HF token in /wo
 
 In azure attach a data disk to `/workspace` and mount it. ([attaching](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/attach-disk-portal))
 
+In google cloud [attaching](https://cloud.google.com/compute/docs/disks/format-mount-disk-linux)
+
+Mount the disk to `/workspace`.
 
 ## Training
 
@@ -43,9 +46,9 @@ pip install torch transformers datasets accelerate fastcore hqq wheel setuptools
 pip install flash-attn --no-build-isolation # faster than sdpa
 ```
 
-1. Donwload model weights before training. Use `fsdp_qlora/experiments/llama_large/download_weights.py` to download the weights. Approx 7-8 mins to download for llama-70b.
+1. Donwload model weights in a CPU machine before training. Use `fsdp_qlora/experiments/llama_large/download_weights.py` to download the weights. Approx 7-8 mins to download for llama-70b.
 
-2. Prepare instruction tuning data mixture. Use `fsdp_qlora/experiments/llama_large/prepare_data_mix.ipynb` to prepare the data.
+2. Prepare instruction tuning data mixture in a CPU machine. Use `fsdp_qlora/experiments/llama_large/prepare_data_mix.ipynb` to prepare the data.
 
 ### Train
 
