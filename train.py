@@ -387,7 +387,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         dora_weights = safetensors.torch.load_file(args["resume_from_dora_weights"])
         for name, param in dora_weights.items():
             model.load_state_dict({name: param}, strict=False)
-    
     dist.barrier()
     
     if rank == 0 or args['verbose']:
@@ -484,8 +483,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if rank == 0:
                 # Load optimizer state.
                 print("Loading optimizer state.")
-                optim_state_dict = torch.load(args["resume_from_optimizer"])
-            
+                optim_state_dict = torch.load(args["resume_from_optimizer"])            
             flattened_osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=optim_state_dict)
             optimizer.load_state_dict(flattened_osd)
 
@@ -528,6 +526,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
     current_training_step = 0
+    
+    if args["resume_from_dora_weights"] is not None:
+        resumed_step = int(Path(args["resume_from_dora_weights"]).parent.stem.split("_")[1])
+    else:
+        resumed_step = None
+    
     # Reset peak memory to track that
     torch.cuda.reset_peak_memory_stats(local_rank)
     for epoch in range(args['num_epochs']):
@@ -536,7 +540,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         
         for batch_idx, batch in enumerate(dataloader):
             accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
-
+            
+            # skip steps if resuming from a checkpoint.
+            if (resumed_step is not None) and (current_training_step < resumed_step):
+                if accumulate_grads:
+                    current_training_step += 1
+                    progress_bar.update(1)
+                continue
+            
             print(f"[rank {local_rank}] Batch Size:", batch['input_ids'].size())
             # Prevent gradient syncing until update step if using no_sync option.
             # Documentation states this should only be used on the root FSDP instance
@@ -640,7 +651,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             # Save model every_n steps.
             if accumulate_grads and args["save_model"] and (current_training_step % args["save_model_every_n_step"] == 0):
                 save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=current_training_step)
-                # save_optimizer(rank, model, optimizer, args, step=current_training_step)
+                save_optimizer(rank, model, optimizer, args, step=current_training_step)
 
         # Print + log peak memory usage for the whole fourth step of training
         if epoch == 0 and (rank == 0 or args['verbose']):
@@ -681,7 +692,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # summon_full_params on lora layers and save.
     if args["save_model"]:
         save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=None)
-        # save_optimizer(rank, model, optimizer, args, step=None)
+        save_optimizer(rank, model, optimizer, args, step=None)
         
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
