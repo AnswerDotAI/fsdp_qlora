@@ -479,14 +479,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if args['resume_from_optimizer']:
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-            optim_state_dict = None
-            if rank == 0:
-                # Load optimizer state.
-                print("Loading optimizer state.")
-                optim_state_dict = torch.load(args["resume_from_optimizer"])            
+            # Load optimizer state.
+            print("Loading optimizer state.")
+            optim_state_dict = torch.load(args["resume_from_optimizer"])            
             flattened_osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=optim_state_dict)
             optimizer.load_state_dict(flattened_osd)
-
 
     # LR scheduler.
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -546,6 +543,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 if accumulate_grads:
                     current_training_step += 1
                     progress_bar.update(1)
+                    if lr_scheduler is not None:
+                        lr_scheduler.step()
                 continue
             
             print(f"[rank {local_rank}] Batch Size:", batch['input_ids'].size())

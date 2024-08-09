@@ -20,6 +20,14 @@ In google cloud [attaching](https://cloud.google.com/compute/docs/disks/format-m
 
 Mount the disk to `/workspace`.
 
+```bash
+# ls -l /dev/disk/by-id/google-*
+sudo mkdir -p /workspace
+sudo mount -o discard,defaults /dev/sdb /workspace
+sudo chmod -R a+w /workspace
+```
+
+
 ## Training
 
 

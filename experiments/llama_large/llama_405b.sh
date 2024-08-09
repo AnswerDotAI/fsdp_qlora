@@ -90,3 +90,5 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --resume_from_dora_weights /workspace/models/llama-3-1-8b-instruct-hqq-4bit/step_10/model_state_dict.safetensors \
 --resume_from_optimizer /workspace/models/llama-3-1-8b-instruct-hqq-4bit/step_10/optimizer.bin \
 --output_dir /workspace/models/llama-3-1-8b-instruct-hqq-4bit 2>&1 | tee /workspace/git/fsdp_qlora/experiments/llama_large/logs/large_llama_8b_hqq_4bit.log
+
+
