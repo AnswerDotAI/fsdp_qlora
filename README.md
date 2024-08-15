@@ -82,7 +82,17 @@ Approx 5 mins (llama70b) and 20-30 mins (llama405b) to load and quantize model w
 2. Upload with 
 
 ```bash
-huggingface-cli upload answerdotai/Meta-Llama-3-70B-Instruct-4bit-DoRA llama-3-70b-instruct-hqq-4bit/
+huggingface-cli upload answerdotai/Meta-Llama-3-1-8B-Instruct-4bit-DoRA llama-3-1-8b-instruct-hqq-4bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-8B-Instruct-4-2bit-DoRA llama-3-1-8b-instruct-hqq-mixed-bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-8B-Instruct-2bit-DoRA llama-3-1-8b-instruct-hqq-2bit
+
+huggingface-cli upload answerdotai/Meta-Llama-3-1-70B-Instruct-4bit-DoRA llama-3-1-70b-instruct-hqq-4bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-70B-Instruct-4-2bit-DoRA llama-3-1-70b-instruct-hqq-mixed-bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-70B-Instruct-2bit-DoRA llama-3-1-70b-instruct-hqq-2bit
+
+huggingface-cli upload answerdotai/Meta-Llama-3-1-405B-Instruct-4bit-DoRA llama-3-1-405b-instruct-hqq-4bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA llama-3-1-405b-instruct-hqq-mixed-bit
+huggingface-cli upload answerdotai/Meta-Llama-3-1-405B-Instruct-2bit-DoRA llama-3-1-405b-instruct-hqq-2bit
 ```
 
 
