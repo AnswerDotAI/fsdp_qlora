@@ -103,7 +103,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                                                             N=hqq_linear.out_features,
                                                             K=hqq_linear.in_features,
                                                             A_dtype="float16",  
-                                                            W_dtype="uint4",  
+                                                            W_dtype={4:"uint4",2:"uint2"}[NBITS],
                                                             accum_dtype="float16",  
                                                             out_dtype="float16",  
                                                             layout="nt",  
@@ -255,15 +255,17 @@ def main(
     # TODO: Separate quantized weights (one time prep) and lora weights.
     # Save quantized weights for a given config only once.
     # VLLM requires a single directory to have all the files. How to share quantized weights across different directories with different lora weights?
-    n_workers = 8
-    quantize_and_save_parallel = functools.partial(quantize_and_save, 
-                                                   quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
-                                                   dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights)
-    # for pretrained_file in pretrained_files:
-    #     quantize_and_save_parallel(pretrained_file)
-    
-    parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
-    
+    quantize_and_save_parallel = functools.partial(quantize_and_save, quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
+                                                    dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights)
+    if args["infer_type"] == "tinygemm":
+        n_workers = 8
+        parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
+    elif args["infer_type"] == "bitblas":    
+        # With bitblas when generating cache files there can be race conditions.
+        for pretrained_file in pretrained_files:
+            quantize_and_save_parallel(pretrained_file)
+    else:
+        raise ValueError("Invalid inference type.")
 
     # save vLLM quant config.
     if args["infer_type"] == "tinygemm":
@@ -293,6 +295,6 @@ def main(
     # save model config.
     model_config = AutoConfig.from_pretrained(MODEL_NAME).to_dict()
     # save model config
-    model_config['rope_scaling'] = {"type" :"dynamic", "factor": 2.0}
+    # model_config['rope_scaling'] = {"type" :"dynamic", "factor": 2.0}
     model_config_filename = save_dir/"config.json"
     with open(model_config_filename, "w+") as f: json.dump(model_config, f)

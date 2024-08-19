@@ -137,6 +137,14 @@ pip install fastcore hqq openai
 Download the model weights and configs.
 
 ```bash
+huggingface-cli download answerdotai/Meta-Llama-3-1-8B-Instruct-4bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-8B-Instruct-4bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-8B-Instruct-4-2bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-8B-Instruct-4-2bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-8B-Instruct-2bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-8B-Instruct-2bit-DoRA
+
+huggingface-cli download answerdotai/Meta-Llama-3-1-70B-Instruct-4bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-70B-Instruct-4bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-70B-Instruct-4-2bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-70B-Instruct-4-2bit-DoRA
+huggingface-cli download answerdotai/Meta-Llama-3-1-70B-Instruct-2bit-DoRA --local-dir /workspace/models/Meta-Llama-3-1-70B-Instruct-2bit-DoRA
+
 huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-4bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-4bit-DoRA
 huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA
 huggingface-cli download answerdotai/Meta-Llama-3-1-405B-Instruct-2bit-DoRA --local-dir ./Meta-Llama-3-1-405B-Instruct-2bit-DoRA
