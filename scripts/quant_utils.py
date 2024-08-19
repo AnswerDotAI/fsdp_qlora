@@ -12,6 +12,7 @@ def replace_linear(model:nn.Module,
                    layers_4bit:List[str]=[], 
                    layers_2bit:List[str]=[],
                    skip_modules:List[str]=["lm_head"], 
+                   skip_layers:List[int]=[], # TODO
                    **kwargs):
     """
     Replace linear modules with a new Linear module.
@@ -28,7 +29,7 @@ def replace_linear(model:nn.Module,
     for name, module in model.named_children():
         if name in skip_modules:
             continue
-        
+
         if len(list(module.children())) > 0:
             replace_linear(module, 
                            linear_replacement=linear_replacement, 

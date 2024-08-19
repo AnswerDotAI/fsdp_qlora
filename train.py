@@ -88,6 +88,10 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
     if args["train_type"] in ["hqq_dora"]:
         cpu_state_dict = {}
         trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('dora_layer', 'magnitude_layer'))]
+        
+        if args["train_layernorms"]:
+            trainable_fsdp_modules += [(n,m) for n,m in model.named_modules() if n.endswith(("input_layernorm", "post_attention_layernorm"))]
+                
         for prefix, module in trainable_fsdp_modules:
             prefix = (prefix.replace("_fsdp_wrapped_module.", "")
                             .replace("_checkpoint_wrapped_module.", "")
@@ -95,6 +99,7 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
                             .replace("_orig_mod.", ""))
             if args['verbose']: print(f"Saving {prefix}")
             with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
+                print(module)
                 cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
             dist.barrier()
             torch.cuda.synchronize()
@@ -112,6 +117,9 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
             qlora_config_dict["lora_rank"]           = args["lora_rank"]
             qlora_config_dict["layer_nbits"]         = layer_nbits
             qlora_config_dict["layer_groupsizes"]    = layer_groupsizes
+            qlora_config_dict["skip_dora_all"]       = args["skip_dora_all"]
+            qlora_config_dict["skip_dora_4bit"]      = args["skip_dora_4bit"]
+            qlora_config_dict["train_layernorms"]    = args["train_layernorms"]
 
             model_config_filename = os.path.join(output_dir, "config.json")
             config_dict = cfg.to_dict()
@@ -202,6 +210,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     attn_impl = "flash_attention_2"
+    
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
         
@@ -365,20 +374,32 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         # Create DoRA layers and set trainable params.
         print("Using HQQDORA", rank)
     
+    # TODO: Skippable quantized layers.
     lora_cls = HQQDORA
-    for name, _ in model.named_modules():
-        module_key, _, value_key = name.rpartition('.')
-        if value_key in args['lora_target_modules']:
-            m = model.get_submodule(name)
-            qlora_layer = lora_cls(m, args["lora_rank"])
-            parent_module = model.get_submodule(module_key)
-            setattr(parent_module, value_key, qlora_layer)
+    if not args["skip_dora_all"]:
+        for name, _ in model.named_modules():
+            module_key, _, value_key = name.rpartition('.')
+            if value_key in args['lora_target_modules']:
+                if args["skip_dora_4bit"] and value_key in layers_4bit:            
+                    if args["nbits"] == "mixed":
+                        print(f"Skipping 4bit layer {value_key} with mixed bits training.")
+                        continue
+                    elif args["nbits"] == "4":
+                        raise ValueError("Cannot skip 4bit layers when all layers are quantized with 4bit.")    
+                m = model.get_submodule(name)
+                qlora_layer = lora_cls(m, args["lora_rank"])
+                parent_module = model.get_submodule(module_key)
+                setattr(parent_module, value_key, qlora_layer)
 
     for n,p in model.named_parameters():
         if any([lora_name in n for lora_name in ['lora_A', 'lora_B', 'magnitude']]):
             p.requires_grad = True
             if args['verbose'] and rank == 0:
                 print("Trainable DoRA layer", n)
+        elif any([lora_name in n for lora_name in ['input_layernorm', 'post_attention_layernorm']]):
+            p.requires_grad = True
+            if args['verbose'] and rank == 0:
+                print("Trainable LayerNorm", n)
         else:
             p.requires_grad = False
     
@@ -652,6 +673,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=current_training_step)
                 save_optimizer(rank, model, optimizer, args, step=current_training_step)
 
+            if args["stop_training_at_step"] is not None and current_training_step >= args["stop_training_at_step"]:
+                print(f"Stopping training at step {current_training_step}")
+                sys.exit(0)
+
         # Print + log peak memory usage for the whole fourth step of training
         if epoch == 0 and (rank == 0 or args['verbose']):
             peak_allocated_memory = torch.cuda.max_memory_allocated(local_rank)
@@ -705,7 +730,7 @@ def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
     train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
-    context_length: int = 512, # Max length of input sequence (in tokens)
+    context_length: int = 2048, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: Param("") = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
@@ -722,9 +747,13 @@ def main(
     model_files_dir: str = None, # Directory containing model files for testing custom model configs
     save_model: bool_arg = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
+    stop_training_at_step: int = None, # Stop training at a specific step
     resume_from_dora_weights: str = None, # Resume training from a checkpoint
     resume_from_optimizer: str = None, # Resume training from a checkpoint
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
+    skip_dora_4bit: bool_arg = False, # Whether to skip 4bit layers for DoRA
+    skip_dora_all: bool_arg = False, # Whether to skip all DoRA layers
+    train_layernorms: bool_arg = False, # Whether to train layernorm
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models

@@ -80,7 +80,7 @@ class InstructionDataset(Dataset):
         }
 
 # And to get the dataloader
-def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=False):
+def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=False, debug=False):
     """Creates a dataset and appropriate dataloader with distributed sampler."""
     # Importing here rather than at the start to avoid multiprocessing issues
     from datasets import Dataset, load_dataset, load_from_disk
@@ -182,9 +182,11 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
 
     # For distributed training, use DistributedSampler
-    sampler = DistributedSampler(dataset, seed=args["seed"])
-
+    if debug:
+        dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, shuffle=True)
     # Use the custom collate function in DataLoader
-    dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
+    else:
+        sampler = DistributedSampler(dataset, seed=args["seed"])
+        dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
 
     return dataloader
