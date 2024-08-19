@@ -99,7 +99,6 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
                             .replace("_orig_mod.", ""))
             if args['verbose']: print(f"Saving {prefix}")
             with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
-                print(module)
                 cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
             dist.barrier()
             torch.cuda.synchronize()
@@ -210,7 +209,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
     attn_impl = "flash_attention_2"
-    
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
         
