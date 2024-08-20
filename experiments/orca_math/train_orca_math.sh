@@ -326,8 +326,5 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --use_activation_cpu_offload false \
 --log_to stdout \
 --verbose true \
---project_name "fsdp-quantized-ft-exps" \
 --save_model true \
---save_model_every_n_step 10 \
---stop_training_at_step 11 \
---output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-bnb-hqq-lora-ln
+--output_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-lora-ln

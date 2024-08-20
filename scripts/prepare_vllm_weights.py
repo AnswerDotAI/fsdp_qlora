@@ -49,7 +49,8 @@ def _get_or_create_bitblas_operator(config):
     return bitblas_matmul
 
 
-def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes, dtype, bitblas_dtype, args, dora_weights):
+def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes, dtype, bitblas_dtype, args, 
+                      dora_weights, layernorm_layers, config_dict):
     
     file_shard_name = Path(filename).name
     pretrained_weights = safetensors.torch.load_file(filename)
@@ -137,26 +138,33 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 
             # DoRA weights.
             # import pdb; pdb.set_trace()
-            lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
-            lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
-            m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
-            rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
-            lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
-            del W_est; torch.cuda.empty_cache()
-            if args["infer_type"] == "bitblas":
-                lora_a = lora_a.to(bitblas_dtype)
-                lora_b = lora_b.to(bitblas_dtype)
-                rescale = rescale.to(bitblas_dtype)
-            quantized_state_dict[n.replace(".weight", ".lora_A")] = lora_a
-            quantized_state_dict[n.replace(".weight", ".lora_B")] = lora_b
-            quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
+            SKIP_DORA = config_dict['skip_dora_all'] or (config_dict['skip_dora_4bit'] and NBITS == 4)
+            if not SKIP_DORA:
+                lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
+                lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
+                m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")]
+                rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
+                lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
+                del W_est; torch.cuda.empty_cache()
+                if args["infer_type"] == "bitblas":
+                    lora_a = lora_a.to(bitblas_dtype)
+                    lora_b = lora_b.to(bitblas_dtype)
+                    rescale = rescale.to(bitblas_dtype)
+                quantized_state_dict[n.replace(".weight", ".lora_A")] = lora_a
+                quantized_state_dict[n.replace(".weight", ".lora_B")] = lora_b
+                quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
+            
+        elif n in layernorm_layers:
+            quantized_state_dict[n] = dora_weights[n]
+            print(f"Replacing {n}.")
+            
         else:
             quantized_state_dict[n] = p
+            print(f"Copying {n}.")
 
     # Save quantized state_dict.
     quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
     save_dir = Path(args["save_dir"])
-    os.makedirs(save_dir, exist_ok=True)    
     safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}")
     
     # Delete the replaced weights.
@@ -236,15 +244,20 @@ def main(
     if not (layer_groupsizes["gate_proj"] == layer_groupsizes["up_proj"]):
         raise ValueError("Gate and up layers must have same group size.")
     
-    
     dtype = getattr(torch, config_dict.get("compute_dtype", "bfloat16"))
     lora_rank = config_dict.get("lora_rank", 64)
+    # lora_alpha = config_dict.get("lora_alpha", 16)
     
     MODEL_NAME = args["model_name"]
     idx = hub.cached_file(MODEL_NAME, SAFE_WEIGHTS_INDEX_NAME)
     pretrained_files, _ = hub.get_checkpoint_shard_files(MODEL_NAME, idx)
     
     dora_weights = safetensors.torch.load_file(args["dora_safetensors_filename"])
+    
+    if config_dict['train_layernorms']:
+        layernorm_layers = set([k for k in dora_weights.keys() if "layernorm" in k])
+    else:
+        layernorm_layers = set([])    
     
     # Here assume quantized layers are same as lora layers.
     quantized_layers = lora_layers
@@ -256,7 +269,8 @@ def main(
     # Save quantized weights for a given config only once.
     # VLLM requires a single directory to have all the files. How to share quantized weights across different directories with different lora weights?
     quantize_and_save_parallel = functools.partial(quantize_and_save, quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
-                                                    dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights)
+                                                    dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights, layernorm_layers=layernorm_layers, 
+                                                    config_dict=config_dict)
     if args["infer_type"] == "tinygemm":
         n_workers = 8
         parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
@@ -268,26 +282,34 @@ def main(
         raise ValueError("Invalid inference type.")
 
     # save vLLM quant config.
+    vllm_nbits 		 = {}
+    vllm_group_sizes = {}
+    if "gate_proj" in lora_layers:
+        vllm_nbits["gate_up_proj"] = layer_nbits["gate_proj"]
+        vllm_group_sizes["gate_up_proj"] = layer_groupsizes["gate_proj"]
+    if "q_proj" in lora_layers:
+        vllm_nbits["qkv_proj"] = layer_nbits["q_proj"]
+        vllm_group_sizes["qkv_proj"] = layer_groupsizes["q_proj"]
+    if "o_proj" in lora_layers:
+        vllm_nbits["o_proj"] = layer_nbits["o_proj"]
+        vllm_group_sizes["o_proj"] = layer_groupsizes["o_proj"]
+    if "down_proj" in lora_layers:
+        vllm_nbits["down_proj"] = layer_nbits["down_proj"]
+        vllm_group_sizes["down_proj"] = layer_groupsizes["down_proj"]          
+        
     if args["infer_type"] == "tinygemm":
         GROUPSIZE = layer_groupsizes["q_proj"]
         quant_config_dict = {"group_size" : GROUPSIZE, "inner_k_tiles" : 8, "lora_rank": lora_rank}
         
     elif args["infer_type"] == "bitblas":
-        vllm_nbits 		 = {}
-        vllm_group_sizes = {}
-        if "gate_proj" in lora_layers:
-            vllm_nbits["gate_up_proj"] = layer_nbits["gate_proj"]
-            vllm_group_sizes["gate_up_proj"] = layer_groupsizes["gate_proj"]
-        if "q_proj" in lora_layers:
-            vllm_nbits["qkv_proj"] = layer_nbits["q_proj"]
-            vllm_group_sizes["qkv_proj"] = layer_groupsizes["q_proj"]
-        if "o_proj" in lora_layers:
-            vllm_nbits["o_proj"] = layer_nbits["o_proj"]
-            vllm_group_sizes["o_proj"] = layer_groupsizes["o_proj"]
-        if "down_proj" in lora_layers:
-            vllm_nbits["down_proj"] = layer_nbits["down_proj"]
-            vllm_group_sizes["down_proj"] = layer_groupsizes["down_proj"]          
-        quant_config_dict = {"group_size" : vllm_group_sizes, "nbits" : vllm_nbits,"lora_rank" : lora_rank}
+        quant_config_dict = {"group_size" : vllm_group_sizes, "nbits" : vllm_nbits, "lora_rank" : lora_rank}
+            
+    # skipped_dora_layers
+    quant_config_dict["skipped_dora_layers"] = []
+    if config_dict['skip_dora_all']:
+        quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
+    if config_dict['skip_dora_4bit']:
+        quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
             
     quant_config_filename = save_dir/"quantize_config.json"
     with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)

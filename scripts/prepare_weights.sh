@@ -94,10 +94,10 @@
 # --save_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qlora-plus-loftq-init-merged
 
 
-# llama-3 8b hqq qdora axis=1(10k)
-python prepare_weights.py \
---infer_type merged_hqq_dora \
---lora_or_dora_filename /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1/model_state_dict.safetensors \
---config_filename /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1/config.json \
---model_name meta-llama/Meta-Llama-3-8B-Instruct \
---save_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1-merged
+# # llama-3 8b hqq qdora axis=1(10k)
+# python prepare_weights.py \
+# --infer_type merged_hqq_dora \
+# --lora_or_dora_filename /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1/model_state_dict.safetensors \
+# --config_filename /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1/config.json \
+# --model_name meta-llama/Meta-Llama-3-8B-Instruct \
+# --save_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1-merged
