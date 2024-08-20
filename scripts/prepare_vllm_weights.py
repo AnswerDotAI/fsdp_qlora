@@ -125,6 +125,14 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas_4bit
                     quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas_4bit
                     quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas_4bit
+                elif args["infer_type"] == "merged":
+                    lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
+                    lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
+                    m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")].cuda()
+                    rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1)
+                    # TODO: Check if this is correct.
+                    merged_weight = ((W_est + lora_b @ lora_a) * rescale.view(-1,1)).detach().cpu() 
+                    quantized_state_dict[n] = merged_weight
                 else:
                     raise ValueError("Invalid inference type.")
             else:
@@ -138,7 +146,8 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 
             # DoRA weights.
             # import pdb; pdb.set_trace()
-            SKIP_DORA = config_dict['skip_dora_all'] or (config_dict['skip_dora_4bit'] and NBITS == 4)
+            SKIP_DORA = (args["infer_type"] == "merged" or config_dict['skip_dora_all'] 
+                         or (config_dict['skip_dora_4bit'] and NBITS == 4))
             if not SKIP_DORA:
                 lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
                 lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
@@ -177,7 +186,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 @call_parse()
 def main(
     train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # Which quantization strategy to use for inference.
-    infer_type: Param("", choices=["tinygemm", "bitblas"]) = "tinygemm", # Which kernel strategy to use for inference.
+    infer_type: Param("", choices=["tinygemm", "bitblas", "merged"]) = "tinygemm", # Which kernel strategy to use for inference.
     dora_safetensors_filename: str = None, # Used for lora/dora inference.
     use_existing_from: str = None, # Used to get quantized base weights from a different directory and replace only dora, and finally rename it.
     config_filename: str = None, # Used to get quantization config, might have been saved after training.
@@ -271,10 +280,10 @@ def main(
     quantize_and_save_parallel = functools.partial(quantize_and_save, quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
                                                     dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights, layernorm_layers=layernorm_layers, 
                                                     config_dict=config_dict)
-    if args["infer_type"] == "tinygemm":
+    if args["infer_type"] in ["tinygemm"]:
         n_workers = 8
         parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
-    elif args["infer_type"] == "bitblas":    
+    elif args["infer_type"] in ["bitblas", "merged"]:    
         # With bitblas when generating cache files there can be race conditions.
         for pretrained_file in pretrained_files:
             quantize_and_save_parallel(pretrained_file)
@@ -305,14 +314,15 @@ def main(
         quant_config_dict = {"group_size" : vllm_group_sizes, "nbits" : vllm_nbits, "lora_rank" : lora_rank}
             
     # skipped_dora_layers
-    quant_config_dict["skipped_dora_layers"] = []
-    if config_dict['skip_dora_all']:
-        quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
-    if config_dict['skip_dora_4bit']:
-        quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
+    if args["infer_type"] != "merged":
+        quant_config_dict["skipped_dora_layers"] = []
+        if config_dict['skip_dora_all']:
+            quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
+        if config_dict['skip_dora_4bit']:
+            quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
             
-    quant_config_filename = save_dir/"quantize_config.json"
-    with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
+        quant_config_filename = save_dir/"quantize_config.json"
+        with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
     
     # save model config.
     model_config = AutoConfig.from_pretrained(MODEL_NAME).to_dict()
