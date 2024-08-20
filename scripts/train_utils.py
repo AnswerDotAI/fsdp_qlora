@@ -100,7 +100,7 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
         return transformer_wrap_policy
     
     policies=[lambda_policy, transformer_wrap_policy]
-    if custom_policy:
+    if not vanilla_policy:
         policies.extend([self_attn_policy, mlp_policy, layernorm_policy])
     return functools.partial(_or_policy, policies=policies)
 

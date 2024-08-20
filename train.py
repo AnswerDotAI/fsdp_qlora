@@ -68,6 +68,7 @@ except ImportError:
 # LoRA and DORA modules
 sys.path.append(".")
 from scripts.dora import HQQDORA
+from scripts.lora import LORA
 from scripts.quant_utils import replace_linear, load_and_quantize
 from scripts.train_utils import Logger, update_progress_bar, get_wrapping_policy, get_optimizer, get_lr_scheduler
 from scripts.dataset_utils import get_dataloader
@@ -85,9 +86,13 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
     
     dist.barrier()
     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    if args["train_type"] in ["hqq_dora"]:
+    if args["train_type"] in ["hqq_dora", "hqq_lora"]:
         cpu_state_dict = {}
-        trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('dora_layer', 'magnitude_layer'))]
+        
+        if args["train_type"] == "hqq_dora":
+            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('dora_layer', 'magnitude_layer'))]
+        elif args["train_type"] == "hqq_lora":
+            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_A', 'lora_B'))]
         
         if args["train_layernorms"]:
             trainable_fsdp_modules += [(n,m) for n,m in model.named_modules() if n.endswith(("input_layernorm", "post_attention_layernorm"))]
@@ -114,12 +119,14 @@ def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsi
             qlora_config_dict["lora_target_modules"] = args["lora_target_modules"]
             qlora_config_dict["compute_dtype"]       = str(compute_dtype).split(".")[-1]
             qlora_config_dict["lora_rank"]           = args["lora_rank"]
+            qlora_config_dict["lora_alpha"]          = args["lora_alpha"]
+            qlora_config_dict["lora_dropout"]        = args["lora_dropout"]
             qlora_config_dict["layer_nbits"]         = layer_nbits
             qlora_config_dict["layer_groupsizes"]    = layer_groupsizes
             qlora_config_dict["skip_dora_all"]       = args["skip_dora_all"]
             qlora_config_dict["skip_dora_4bit"]      = args["skip_dora_4bit"]
             qlora_config_dict["train_layernorms"]    = args["train_layernorms"]
-
+            
             model_config_filename = os.path.join(output_dir, "config.json")
             config_dict = cfg.to_dict()
             config_dict["qlora_config"] = qlora_config_dict
@@ -266,8 +273,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 setattr(layer, 'self_attn', attn_cls(m.config, m.layer_idx))
         
         # Quantization config.
-        groupsize_4bit = 128
-        groupsize_2bit = 64
+        groupsize_4bit = args["groupsize_4bit"]
+        groupsize_2bit = args["groupsize_2bit"]
         quant_config_4bit = BaseQuantizeConfig(nbits=4, group_size=groupsize_4bit, quant_zero=False,
                                                 quant_scale=False, offload_meta=False, view_as_float=True, axis=1)
         quant_config_2bit = BaseQuantizeConfig(nbits=2, group_size=groupsize_2bit, quant_zero=False,
@@ -373,7 +380,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         print("Using HQQDORA", rank)
     
     # TODO: Skippable quantized layers.
-    lora_cls = HQQDORA
+    if args["train_type"] == "hqq_dora":
+        lora_cls = HQQDORA
+    elif args["train_type"] == "hqq_lora":
+        lora_cls = LORA
     if not args["skip_dora_all"]:
         for name, _ in model.named_modules():
             module_key, _, value_key = name.rpartition('.')
@@ -385,7 +395,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     elif args["nbits"] == "4":
                         raise ValueError("Cannot skip 4bit layers when all layers are quantized with 4bit.")    
                 m = model.get_submodule(name)
-                qlora_layer = lora_cls(m, args["lora_rank"])
+                qlora_layer = lora_cls(m, args["lora_rank"], args["lora_alpha"], args["lora_dropout"])
                 parent_module = model.get_submodule(module_key)
                 setattr(parent_module, value_key, qlora_layer)
 
@@ -417,7 +427,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)        
 
     # Wrap model with llama-recipies or custom LoRA policy
-    my_auto_wrap_policy = get_wrapping_policy(custom_policy=True, vanilla_policy=False)
+    my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] == "hqq_dora", vanilla_policy=False)
 
     if rank == 0 or args['verbose']:
         print("Wrapping model w/ FSDP", rank)
@@ -726,7 +736,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 @call_parse()
 def main(
     world_size: int = -1, # Number of GPUs to use. -1 = all available GPUs.
-    train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # "full", "lora", "qlora", or "custom_qlora"
+    train_type: Param("", choices=["hqq_dora", "hqq_lora"]) = "hqq_dora", # "full", "lora", "qlora", or "custom_qlora"
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
     context_length: int = 2048, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
@@ -749,11 +759,15 @@ def main(
     resume_from_dora_weights: str = None, # Resume training from a checkpoint
     resume_from_optimizer: str = None, # Resume training from a checkpoint
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
+    groupsize_4bit: int = 128, # Group size for 4bit quantization
+    groupsize_2bit: int = 64, # Group size for 2bit quantization
     skip_dora_4bit: bool_arg = False, # Whether to skip 4bit layers for DoRA
     skip_dora_all: bool_arg = False, # Whether to skip all DoRA layers
     train_layernorms: bool_arg = False, # Whether to train layernorm
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
+    lora_alpha: float = 16, # LoRA alpha for lora/qlora
+    lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate

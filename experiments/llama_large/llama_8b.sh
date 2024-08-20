@@ -74,7 +74,7 @@ cd /workspace/git/fsdp_qlora && python train.py \
 --output_dir $SAVE_DIR/llama-3-1-8b-instruct-hqq-dora-4bit-ln 2>&1 | tee $LOG_DIR/llama_3_1_8b_hqq_dora_4bit_ln.log
 
 
-# HQQ 4bit + LN training.
+# HQQ 4bit (HQQ) + LN training.
 cd /workspace/git/fsdp_qlora && python train.py \
 --train_type hqq_dora \
 --nbits 4 \

@@ -27,6 +27,11 @@ sudo mount -o discard,defaults /dev/sdb /workspace
 sudo chmod -R a+w /workspace
 ```
 
+Make vim default git editor
+
+```bash
+git config --global core.editor "vim"
+```
 
 ## Training
 
