@@ -141,25 +141,12 @@ def get_lr_scheduler(optimizer:optim.Optimizer, dataloader:DataLoader, gradient_
 
 
 # Optimizer
-def get_optimizer(model:nn.Module, args:Dict):
+def get_optimizer(model:nn.Module, args:Dict, rank:int):
     """Returns an optimizer. We can add more options here if needed."""
     
-    # if args['lora_plus_lambda'] is not None:
-    #     lora_B_lr = args['lr'] * args['lora_plus_lambda']
-    #     params    = [{"params":[]}, {"params":[], 'lr':lora_B_lr}]        
-    #     for name, param in model.named_parameters():
-    #         if any(pattern in name for pattern in ('lora_B', 'lora_AB._fsdp_wrapped_module.1')):
-    #             if args['verbose']: print(f"Adding {name} to lora_B params")
-    #             params[1]['params'].append(param)
-    #         else:
-    #             if args['verbose']: print(f"Adding {name} to params")
-    #             params[0]['params'].append(param)
-    # else:
     params = model.parameters()
     grouped_params = args['train_layernorms'] or (args["nbits"] == "mixed" and args["disc_lr"])
-    
-    grouped_params = False
-    
+        
     # Iterate through the named modules of the model.
     if grouped_params:
         param_dict = {param_name: param for param_name, param in model.named_parameters()}
@@ -196,17 +183,21 @@ def get_optimizer(model:nn.Module, args:Dict):
                 decay_lower_lr.append(f"{module_name}.{suffix}")
             else:
                 continue
-  
-        print("No decay params:")
-        for l in no_decay: print(l)
-        print("Decay base lr params:")
-        for l in decay_base_lr: print(l)
-        print("Decay lower lr params:")
-        for l in decay_lower_lr: print(l)
         
-        print("Param dict:")
-        for param_name, param in param_dict.items():
-            print(param_name, param.requires_grad)
+        base_lr = args['lr']
+        lower_lr = args['lr'] / args['lr_div_factor']
+        
+        if args["verbose"] and rank == 0:
+            print("No decay params:")
+            for l in no_decay: print(l)
+            print(f"Decay base lr={base_lr} params:")
+            for l in decay_base_lr: print(l)
+            print(f"Decay lower lr={lower_lr} params:")
+            for l in decay_lower_lr: print(l)
+            
+            print("Param dict:")
+            for param_name, param in param_dict.items():
+                print(param_name, param.requires_grad)
             
         no_decay_param = []
         for param_name in no_decay:
@@ -220,11 +211,11 @@ def get_optimizer(model:nn.Module, args:Dict):
             
         grouped_params = []
         if len(no_decay_param) > 0:
-            grouped_params.append({"params": no_decay_param, "weight_decay": 0.0})
+            grouped_params.append({"params": no_decay_param, "lr": base_lr, "weight_decay": 0.0})
         if len(decay_base_lr_param) > 0:
-            grouped_params.append({"params": decay_base_lr_param, "lr": args['lr'], "weight_decay": args['wd']})
+            grouped_params.append({"params": decay_base_lr_param, "lr": base_lr, "weight_decay": args['wd']})
         if len(decay_lower_lr_param) > 0:
-            grouped_params.append({"params": decay_lower_lr_param, "lr": args['lr'] / args['lr_div_factor'], "weight_decay": args['wd']})
+            grouped_params.append({"params": decay_lower_lr_param, "lr": lower_lr, "weight_decay": args['wd']})
     
     if args["optimizer"] == "adam":
         return optim.Adam(params, lr=args['lr'])

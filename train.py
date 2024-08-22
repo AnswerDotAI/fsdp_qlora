@@ -446,7 +446,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         raise ValueError("Invalid FSDP sharding strategy")
     
     use_orig_params = args['train_layernorms'] or (args["nbits"] == "mixed" and args["disc_lr"])
-    use_orig_params = False
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
@@ -507,7 +506,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Create the optimizer
-    optimizer = get_optimizer(model, args)    
+    optimizer = get_optimizer(model, args, rank)    
     
     if args['resume_from_optimizer']:
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
