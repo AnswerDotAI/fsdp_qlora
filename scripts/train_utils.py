@@ -156,7 +156,76 @@ def get_optimizer(model:nn.Module, args:Dict):
     #             params[0]['params'].append(param)
     # else:
     params = model.parameters()
+    grouped_params = args['train_layernorms'] or (args["nbits"] == "mixed" and args["disc_lr"])
+    
+    grouped_params = False
+    
+    # Iterate through the named modules of the model.
+    if grouped_params:
+        param_dict = {param_name: param for param_name, param in model.named_parameters()}
+        no_decay = []
+        if args["train_layernorms"]:
+            for module_name, module in model.named_modules():
+                # Check if the current module is an instance of any of the desired types (LayerNorm or torch.nn.Embedding).
+                if isinstance(module, (LlamaRMSNorm)) and any(layer in module_name for layer in ['input_layernorm', 'post_attention_layernorm']):
+                    no_decay.append(f"{module_name}.weight")
+                
+        # Create an empty list to store the names of the Linear layer weights with weight decay.
+        decay_base_lr = [] # e.g. lr
+        decay_lower_lr = [] # e.g. lr / 10
+        if (args["nbits"] == "mixed") and args["disc_lr"]:
+            layers_base_lr  = ["gate_proj", "up_proj", "down_proj"] # mlp 2bit
+            layers_lower_lr = ["q_proj", "k_proj", "v_proj", "o_proj"] # attn 4bit
+        else:
+            layers_base_lr = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            layers_lower_lr  = []
+            
+        # Iterate through the named modules of the model.
+        for module_name, module in model.named_modules():
+            # Check if the current module is an instance of the desired type (torch.nn.Linear).
+            if isinstance(module, (torch.nn.Linear)):
+                suffix = "weight"
+            elif isinstance(module, (MagnitudeLayer)):
+                suffix = "magnitude"
+            else:
+                continue
+            # If the module is an instance of torch.nn.Linear, append its name with a ".weight" suffix to the decay list.
+            if any(layer in module_name for layer in layers_base_lr):
+                decay_base_lr.append(f"{module_name}.{suffix}")
+            elif any(layer in module_name for layer in layers_lower_lr):
+                decay_lower_lr.append(f"{module_name}.{suffix}")
+            else:
+                continue
+  
+        print("No decay params:")
+        for l in no_decay: print(l)
+        print("Decay base lr params:")
+        for l in decay_base_lr: print(l)
+        print("Decay lower lr params:")
+        for l in decay_lower_lr: print(l)
         
+        print("Param dict:")
+        for param_name, param in param_dict.items():
+            print(param_name, param.requires_grad)
+            
+        no_decay_param = []
+        for param_name in no_decay:
+            no_decay_param.append(param_dict[param_name])
+        decay_base_lr_param = []
+        for param_name in decay_base_lr:
+            decay_base_lr_param.append(param_dict[param_name])
+        decay_lower_lr_param = []
+        for param_name in decay_lower_lr:
+            decay_lower_lr_param.append(param_dict[param_name])
+            
+        grouped_params = []
+        if len(no_decay_param) > 0:
+            grouped_params.append({"params": no_decay_param, "weight_decay": 0.0})
+        if len(decay_base_lr_param) > 0:
+            grouped_params.append({"params": decay_base_lr_param, "lr": args['lr'], "weight_decay": args['wd']})
+        if len(decay_lower_lr_param) > 0:
+            grouped_params.append({"params": decay_lower_lr_param, "lr": args['lr'] / args['lr_div_factor'], "weight_decay": args['wd']})
+    
     if args["optimizer"] == "adam":
         return optim.Adam(params, lr=args['lr'])
     elif args["optimizer"] == "sgd":
@@ -164,7 +233,9 @@ def get_optimizer(model:nn.Module, args:Dict):
     elif args["optimizer"] == "adadelta":
         return optim.Adadelta(params, lr=args['lr'])
     elif args["optimizer"] == "adamw":
-        return torch.optim.AdamW(params, lr=args['lr'], betas=(0.9,0.95),
-                                 eps=1e-5, weight_decay=args['wd'])
+        if grouped_params:
+            return optim.AdamW(grouped_params, betas=(0.9,0.95), eps=1e-5)
+        else:
+            return optim.AdamW(params, lr=args['lr'], betas=(0.9,0.95), eps=1e-5, weight_decay=args['wd'])
     else:
         raise ValueError("Invalid optimizer")

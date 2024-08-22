@@ -227,9 +227,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg.use_cache = False
     cfg._attn_implementation = attn_impl
     
-    # ## DEBUG ###
-    # cfg.num_hidden_layers = 1
-    # ## DEBUG END ###
+    ## DEBUG ###
+    cfg.num_hidden_layers = 1
+    ## DEBUG END ###
     
     # RoPE scaling.
     if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
@@ -353,12 +353,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
         weights = safetensors.torch.load_file(filename)
         
-        # ### DEBUG ###
-        # # remove all other layers but first.
-        # weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
-        # if len(weights) == 0:
-        #     continue
-        # ### DEBUG END ###
+        ### DEBUG ###
+        # remove all other layers but first.
+        weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
+        if len(weights) == 0:
+            continue
+        ### DEBUG END ###
         
         parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                     model=model, 
@@ -404,7 +404,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             p.requires_grad = True
             if args['verbose'] and rank == 0:
                 print("Trainable DoRA layer", n)
-        elif any([lora_name in n for lora_name in ['input_layernorm', 'post_attention_layernorm']]):
+        elif args["train_layernorms"] and any([lora_name in n for lora_name in ['input_layernorm', 'post_attention_layernorm']]):
             p.requires_grad = True
             if args['verbose'] and rank == 0:
                 print("Trainable LayerNorm", n)
@@ -445,14 +445,18 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     else:
         raise ValueError("Invalid FSDP sharding strategy")
     
+    use_orig_params = args['train_layernorms'] or (args["nbits"] == "mixed" and args["disc_lr"])
+    use_orig_params = False
     model = FSDP(
         model,
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
-        backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
-        use_orig_params=False,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+        forward_prefetch=False,
+        use_orig_params=use_orig_params,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
-        limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
+        # limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
+        limit_all_gathers=False,
         device_id=torch.cuda.current_device(),
         sync_module_states=args["low_memory"],
         param_init_fn=lambda module: module.to_empty(device=torch.device("cuda"), recurse=False)
@@ -503,7 +507,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
 
     # Create the optimizer
-    optimizer = get_optimizer(model, args)
+    optimizer = get_optimizer(model, args)    
     
     if args['resume_from_optimizer']:
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -771,6 +775,8 @@ def main(
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models
     verbose: bool_arg = False, # Whether to print extra info for debugging
     lr: float = 1e-5, # Learning rate
+    lr_div_factor: float = 10, # Lower lr by this factor for certain layers
+    disc_lr: bool_arg = False, # Use a different learning rates across layers 
     apply_gradient_clipping: bool_arg = False, # Apply gradient norm clipping
     grad_norm: float = 0.3, # Gradient norm clipping
     wd: float = 0.1, # Weight decay
