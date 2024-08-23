@@ -227,9 +227,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     cfg.use_cache = False
     cfg._attn_implementation = attn_impl
     
-    # ## DEBUG ###
-    # cfg.num_hidden_layers = 1
-    # ## DEBUG END ###
+    ## DEBUG ###
+    cfg.num_hidden_layers = 1
+    ## DEBUG END ###
     
     # RoPE scaling.
     if args["scale_rope"] and (args["context_length"] > cfg.max_position_embeddings):
@@ -298,17 +298,21 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                             **{layer:groupsize_2bit for layer in layers_2bit}}
             
         skip_modules = ["lm_head"]
+        block_influence_patterns = args["block_influence_layers"].split(",")
+        block_influence_patterns = [f"layers.{layer_idx}" for layer_idx in block_influence_patterns]
         model.model = replace_linear(model=model.model, 
                                         linear_replacement=HQQLinear, 
                                         quant_config_4bit=quant_config_4bit, 
                                         quant_config_2bit=quant_config_2bit,
                                         layers_4bit=layers_4bit, 
                                         layers_2bit=layers_2bit,
+                                        skip_modules=skip_modules,
+                                        block_influence_patterns=block_influence_patterns,
+                                        prefix='model',
                                         device=rank,
                                         compute_dtype=compute_dtype, 
                                         del_orig=True, 
-                                        initialize=False, 
-                                        skip_modules=skip_modules)
+                                        initialize=False)
         HQQLinear.set_backend(HQQBackend.PYTORCH_BACKPROP) # needed for axis=1.         
         
     if rank == 0 or args['verbose']:
@@ -353,12 +357,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
         weights = safetensors.torch.load_file(filename)
         
-        # ### DEBUG ###
-        # # remove all other layers but first.
-        # weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
-        # if len(weights) == 0:
-        #     continue
-        # ### DEBUG END ###
+        ### DEBUG ###
+        # remove all other layers but first.
+        weights = {k:v for k,v in weights.items() if ("layers." not in k) or ("layers.0" in k)}
+        if len(weights) == 0:
+            continue
+        ### DEBUG END ###
         
         parallel(load_and_quantize_parallel, iter(weights.items()), n_workers=n_workers, threadpool=True,
                     model=model, 
@@ -367,7 +371,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     skip_names=load_param_skip_names,
                     to_cpu=(args["low_memory"] and rank==0), 
                     to_meta=(args["low_memory"] and rank!=0),
-                    verbose=args["verbose"])
+                    verbose=args["verbose"], 
+                    loftq_init=args["loftq_init"], 
+                    lora_rank=args["lora_rank"])
     if rank == 0 and args["verbose"]:
         print(f"Loaded model weights in {time.time()-start:.3f} seconds")
     torch.cuda.empty_cache() # cleanup any extra memory usage from parallel loading.
@@ -769,6 +775,8 @@ def main(
     train_layernorms: bool_arg = False, # Whether to train layernorm
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
+    loftq_init: bool_arg = False, # Initialize LoRA with LoFTQ
+    block_influence_layers: str = "", # Comma seperated list of layer names to keep at 4bit
     lora_alpha: float = 16, # LoRA alpha for lora/qlora
     lora_dropout: float = 0.1, # LoRA dropout for lora/qlora
     lora_target_modules: Param("", choices=["all", "default"]) = "all", # If 'default', uses peft defaults. Use 'all' for our best guess for Llama models

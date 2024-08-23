@@ -12,7 +12,8 @@ def replace_linear(model:nn.Module,
                    layers_4bit:List[str]=[], 
                    layers_2bit:List[str]=[],
                    skip_modules:List[str]=["lm_head"], 
-                   skip_layers:List[int]=[], # TODO
+                   block_influence_patterns:List[int]=[],
+                   prefix:str="model",
                    **kwargs):
     """
     Replace linear modules with a new Linear module.
@@ -31,6 +32,8 @@ def replace_linear(model:nn.Module,
             continue
 
         if len(list(module.children())) > 0:
+            print(prefix + "." + name)
+            print(block_influence_patterns)
             replace_linear(module, 
                            linear_replacement=linear_replacement, 
                            quant_config_4bit=quant_config_4bit, 
@@ -38,16 +41,22 @@ def replace_linear(model:nn.Module,
                            layers_4bit=layers_4bit, 
                            layers_2bit=layers_2bit, 
                            skip_modules=skip_modules, 
+                           block_influence_patterns=block_influence_patterns,
+                           prefix=prefix + "." + name,
                            **kwargs)
 
         if isinstance(module, torch.nn.Linear):
             if issubclass(linear_replacement, HQQLinear):
                 if name in layers_4bit:
                     quant_config = quant_config_4bit
-                    print(f"Replacing {name} with {linear_replacement} with 4-bit")
+                    print(f"Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
                 elif name in layers_2bit:
-                    quant_config = quant_config_2bit
-                    print(f"Replacing {name} with {linear_replacement} with 2-bit")
+                    if any([block_influence_pattern in prefix for block_influence_pattern in block_influence_patterns]):
+                        quant_config = quant_config_4bit
+                        print(f"Block Influence: Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
+                    else:
+                        quant_config = quant_config_2bit
+                        print(f"Replacing {prefix}.{name} with {linear_replacement} with 2-bit")
                 model._modules[name] = linear_replacement(module, quant_config, **kwargs)
             else:
                 raise ValueError(f"Unsupported linear replacement: {type(linear_replacement)}")
@@ -56,7 +65,7 @@ def replace_linear(model:nn.Module,
 
 def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
                       skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, 
-                      loftq_init:bool=False, lora_rank:int=64, is_dora:bool=True):
+                      loftq_init:bool=False, lora_rank:int=64):
     """
     Loads `value` tensor into submodule of `module`, optionally skipping `skip_names` and converting to `dtype`.
 
