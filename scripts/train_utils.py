@@ -146,6 +146,9 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
     
     params = model.parameters()
     grouped_params = args['train_layernorms'] or (args["nbits"] == "mixed" and args["disc_lr"])
+    
+    block_influence_patterns = args["block_influence_layers"].split(",")
+    block_influence_patterns = [f"layers.{layer_idx}" for layer_idx in block_influence_patterns]
         
     # Iterate through the named modules of the model.
     if grouped_params:
@@ -176,10 +179,11 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
                 suffix = "magnitude"
             else:
                 continue
+            
             # If the module is an instance of torch.nn.Linear, append its name with a ".weight" suffix to the decay list.
             if any(layer in module_name for layer in layers_base_lr):
                 decay_base_lr.append(f"{module_name}.{suffix}")
-            elif any(layer in module_name for layer in layers_lower_lr):
+            elif any(layer in module_name for layer in layers_lower_lr) or any(layer in module_name for layer in block_influence_patterns):
                 decay_lower_lr.append(f"{module_name}.{suffix}")
             else:
                 continue

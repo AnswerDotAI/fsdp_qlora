@@ -51,7 +51,7 @@ def replace_linear(model:nn.Module,
                     quant_config = quant_config_4bit
                     print(f"Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
                 elif name in layers_2bit:
-                    if any([block_influence_pattern in prefix for block_influence_pattern in block_influence_patterns]):
+                    if any([block_influence_pattern + "." in prefix for block_influence_pattern in block_influence_patterns]):
                         quant_config = quant_config_4bit
                         print(f"Block Influence: Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
                     else:

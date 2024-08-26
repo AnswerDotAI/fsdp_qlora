@@ -63,6 +63,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
         quantized_state_dict = {}
         print(f"Preparing all weights for {file_shard_name} from scratch.")
         
+    block_influence_layers = config_dict.get("block_influence_layers", [])    
     for n,p in tqdm(iter(pretrained_weights.items())):
         if "inv_freq" in n: continue
         p = p.to(dtype)
@@ -70,6 +71,11 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
             if existing_quantized_dir is None:
                 NBITS = layer_nbits[n.split(".")[-2]]
                 GROUPSIZE = layer_groupsizes[n.split(".")[-2]]
+                
+                if any(l in n for l in block_influence_layers):
+                    NBITS = 4
+                    GROUPSIZE = 128
+                    print(f"Block Influence: Setting {n} to 4-bit.")
                 
                 # Get layer-wise quant config.
                 quant_config = BaseQuantizeConfig(nbits=NBITS,
@@ -314,13 +320,14 @@ def main(
         quant_config_dict = {"group_size" : vllm_group_sizes, "nbits" : vllm_nbits, "lora_rank" : lora_rank}
             
     # skipped_dora_layers
+    block_influence_layers = config_dict.get("block_influence_layers", [])    
     if args["infer_type"] != "merged":
         quant_config_dict["skipped_dora_layers"] = []
         if config_dict['skip_dora_all']:
             quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
         if config_dict['skip_dora_4bit']:
             quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
-            
+        quant_config_dict["block_influence_layers"] = block_influence_layers
         quant_config_filename = save_dir/"quantize_config.json"
         with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
     
