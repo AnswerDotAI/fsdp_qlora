@@ -49,14 +49,14 @@ def replace_linear(model:nn.Module,
             if issubclass(linear_replacement, HQQLinear):
                 if name in layers_4bit:
                     quant_config = quant_config_4bit
-                    print(f"Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
+                    print(f"Replacing {prefix}.{name} with {linear_replacement} with 4-bit groupsize {quant_config['weight_quant_params']['group_size']}")
                 elif name in layers_2bit:
                     if any([block_influence_pattern + "." in prefix for block_influence_pattern in block_influence_patterns]):
                         quant_config = quant_config_4bit
-                        print(f"Block Influence: Replacing {prefix}.{name} with {linear_replacement} with 4-bit")
+                        print(f"Block Influence: Replacing {prefix}.{name} with {linear_replacement} with 4-bit {quant_config['weight_quant_params']['group_size']}")
                     else:
                         quant_config = quant_config_2bit
-                        print(f"Replacing {prefix}.{name} with {linear_replacement} with 2-bit")
+                        print(f"Replacing {prefix}.{name} with {linear_replacement} with 2-bit {quant_config['weight_quant_params']['group_size']}")
                 model._modules[name] = linear_replacement(module, quant_config, **kwargs)
             else:
                 raise ValueError(f"Unsupported linear replacement: {type(linear_replacement)}")

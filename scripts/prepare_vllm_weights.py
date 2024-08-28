@@ -24,12 +24,13 @@ from hqq.backends.torchao import patch_hqq_to_aoint4
 
 import bitblas
 from bitblas.cache import global_operator_cache, get_database_path
-from bitblas.module import BITBLAS_TARGET, BITBLAS_DATABASE_PATH
+from bitblas.module import auto_detect_nvidia_target, BITBLAS_DATABASE_PATH
 
 from transformers.utils import logging
 logging.set_verbosity_info()
 logger = logging.get_logger()
 
+BITBLAS_TARGET = auto_detect_nvidia_target()
 BITBLAS_DATABASE_PATH = "/workspace/.cache/bitblas"
 BITBLAS_OPT_M = [1, 16, 32, 64, 128, 256, 512]
 def _get_or_create_bitblas_operator(config):
@@ -72,10 +73,13 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 NBITS = layer_nbits[n.split(".")[-2]]
                 GROUPSIZE = layer_groupsizes[n.split(".")[-2]]
                 
-                if any(l in n for l in block_influence_layers):
+                # Block Influence.
+                if any(l + "." in n for l in block_influence_layers):
                     NBITS = 4
-                    GROUPSIZE = 128
+                    GROUPSIZE = config_dict['groupsize_4bit']
                     print(f"Block Influence: Setting {n} to 4-bit.")
+                    
+                print(f"Quantizing {n} with {NBITS}-bit and groupsize: {GROUPSIZE}.")
                 
                 # Get layer-wise quant config.
                 quant_config = BaseQuantizeConfig(nbits=NBITS,
@@ -327,7 +331,10 @@ def main(
             quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
         if config_dict['skip_dora_4bit']:
             quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
+        
         quant_config_dict["block_influence_layers"] = block_influence_layers
+        quant_config_dict["groupsize_4bit"]         = config_dict['groupsize_4bit']
+        
         quant_config_filename = save_dir/"quantize_config.json"
         with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
     

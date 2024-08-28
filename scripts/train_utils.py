@@ -153,12 +153,19 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
     # Iterate through the named modules of the model.
     if grouped_params:
         param_dict = {param_name: param for param_name, param in model.named_parameters()}
-        no_decay = []
+        no_decay_base_lr = []
+        no_decay_lower_lr = []
         if args["train_layernorms"]:
             for module_name, module in model.named_modules():
                 # Check if the current module is an instance of any of the desired types (LayerNorm or torch.nn.Embedding).
                 if isinstance(module, (LlamaRMSNorm)) and any(layer in module_name for layer in ['input_layernorm', 'post_attention_layernorm']):
-                    no_decay.append(f"{module_name}.weight")
+                    if any(layer+"." in module_name for layer in block_influence_patterns):
+                        if args["verbose"] and rank == 0:
+                            print(block_influence_patterns)
+                            print(f"Placing block influence layernorm layers in lower lr {module_name}")
+                        no_decay_lower_lr.append(f"{module_name}.weight")
+                    else:
+                        no_decay_base_lr.append(f"{module_name}.weight")
                 
         # Create an empty list to store the names of the Linear layer weights with weight decay.
         decay_base_lr = [] # e.g. lr
@@ -181,31 +188,42 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
                 continue
             
             # If the module is an instance of torch.nn.Linear, append its name with a ".weight" suffix to the decay list.
-            if any(layer in module_name for layer in layers_base_lr):
+            if any(layer+"." in module_name for layer in block_influence_patterns):
+                if args["verbose"] and rank == 0:
+                    print(block_influence_patterns)
+                    print(f"Placing block influence layers in lower lr {module_name}")
+                decay_lower_lr.append(f"{module_name}.{suffix}")
+            elif any(layer in module_name for layer in layers_base_lr):
                 decay_base_lr.append(f"{module_name}.{suffix}")
-            elif any(layer in module_name for layer in layers_lower_lr) or any(layer in module_name for layer in block_influence_patterns):
+            elif any(layer in module_name for layer in layers_lower_lr):
                 decay_lower_lr.append(f"{module_name}.{suffix}")
             else:
                 continue
         
         base_lr = args['lr']
         lower_lr = args['lr'] / args['lr_div_factor']
+        wd = args['wd']
         
         if args["verbose"] and rank == 0:
-            print("No decay params:")
-            for l in no_decay: print(l)
-            print(f"Decay base lr={base_lr} params:")
+            print(f"No decay base lr={base_lr} params:")
+            for l in no_decay_base_lr: print(l)
+            print(f"No decay lower lr={lower_lr} params:")
+            for l in no_decay_lower_lr: print(l)
+            print(f"Decay base lr={base_lr} wd={wd} params:")
             for l in decay_base_lr: print(l)
-            print(f"Decay lower lr={lower_lr} params:")
+            print(f"Decay lower lr={lower_lr} wd={wd} params:")
             for l in decay_lower_lr: print(l)
             
             print("Param dict:")
             for param_name, param in param_dict.items():
                 print(param_name, param.requires_grad)
             
-        no_decay_param = []
-        for param_name in no_decay:
-            no_decay_param.append(param_dict[param_name])
+        no_decay_base_lr_param = []
+        for param_name in no_decay_base_lr:
+            no_decay_base_lr_param.append(param_dict[param_name])
+        no_decay_lower_lr_param = []
+        for param_name in no_decay_lower_lr:
+            no_decay_lower_lr_param.append(param_dict[param_name])
         decay_base_lr_param = []
         for param_name in decay_base_lr:
             decay_base_lr_param.append(param_dict[param_name])
@@ -214,8 +232,10 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
             decay_lower_lr_param.append(param_dict[param_name])
             
         grouped_params = []
-        if len(no_decay_param) > 0:
-            grouped_params.append({"params": no_decay_param, "lr": base_lr, "weight_decay": 0.0})
+        if len(no_decay_base_lr_param) > 0:
+            grouped_params.append({"params": no_decay_base_lr_param, "lr": base_lr, "weight_decay": 0.0})
+        if len(no_decay_lower_lr_param) > 0:
+            grouped_params.append({"params": no_decay_lower_lr_param, "lr": lower_lr, "weight_decay": 0.0})
         if len(decay_base_lr_param) > 0:
             grouped_params.append({"params": decay_base_lr_param, "lr": base_lr, "weight_decay": args['wd']})
         if len(decay_lower_lr_param) > 0:

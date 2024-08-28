@@ -48,40 +48,138 @@ DISC_LR=true
 #     done
 # done
 
-for step in 125 250 375 500
-do
-    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence/step_$step
-    python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
-    --train_type hqq_dora \
-    --infer_type bitblas \
-    --model_name $MODEL_NAME \
-    --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
-    --config_filename $MODEL_DIR/config.json \
-    --save_dir $MODEL_DIR/vllm_bitblas
-done
+# for step in 125 250 375 500
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
+
+# for step in 125 250 375 500
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-loftq/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
+
+# for step in 125 250 375 500
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-loftq-block-influence/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
+
+
+# for step in 125 #125 250 375 500 625 750
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-20pct/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas 2>&1 | tee logs/prepare_vllm_weights.log
+# done
+
+# for step in 125 250 375 500 625 750
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-20pct/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type merged \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/merged 2>&1 | tee logs/prepare_vllm_weights.log
+# done
+
+# for step in 125 250 375 500
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-adj-20pct/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
 
 for step in 125 250 375 500
 do
-    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-loftq/step_$step
+    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-adj-20pct/step_$step
     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
     --train_type hqq_dora \
-    --infer_type bitblas \
+    --infer_type merged \
     --model_name $MODEL_NAME \
     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
     --config_filename $MODEL_DIR/config.json \
-    --save_dir $MODEL_DIR/vllm_bitblas
+    --save_dir $MODEL_DIR/merged
 done
 
-for step in 125 250 375 500
+
+# for step in 125 250
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-30pct/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
+
+for step in 125 250
 do
-    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-loftq-block-influence/step_$step
+    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-30pct/step_$step
     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
     --train_type hqq_dora \
-    --infer_type bitblas \
+    --infer_type merged \
     --model_name $MODEL_NAME \
     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
     --config_filename $MODEL_DIR/config.json \
-    --save_dir $MODEL_DIR/vllm_bitblas
+    --save_dir $MODEL_DIR/merged
+done
+
+# for step in 125
+# do
+#     MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-adj-30pct/step_$step
+#     python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+#     --train_type hqq_dora \
+#     --infer_type bitblas \
+#     --model_name $MODEL_NAME \
+#     --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+#     --config_filename $MODEL_DIR/config.json \
+#     --save_dir $MODEL_DIR/vllm_bitblas
+# done
+
+for step in 125
+do
+    MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-adj-30pct/step_$step
+    python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+    --train_type hqq_dora \
+    --infer_type merged \
+    --model_name $MODEL_NAME \
+    --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+    --config_filename $MODEL_DIR/config.json \
+    --save_dir $MODEL_DIR/merged
 done
 
 
