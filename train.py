@@ -571,7 +571,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     current_training_step = 0
     
     if args["resume_from_dora_weights"] is not None:
-        resumed_step = int(Path(args["resume_from_dora_weights"]).parent.stem.split("_")[1])
+        if args["resumed_step"] is not None:
+            resumed_step = args["resumed_step"]
+        else:
+            resumed_step = int(Path(args["resume_from_dora_weights"]).parent.stem.split("_")[1])
+        if args["verbose"] and rank == 0:
+            print(f"Resuming training from step {resumed_step}")
     else:
         resumed_step = None
     
@@ -775,6 +780,7 @@ def main(
     stop_training_at_step: int = None, # Stop training at a specific step
     resume_from_dora_weights: str = None, # Resume training from a checkpoint
     resume_from_optimizer: str = None, # Resume training from a checkpoint
+    resumed_step: int = None, # Step to resume training from
     nbits: Param("", choices=["2", "4", "mixed"]) = "4", # Number of bits to quantize to
     groupsize_4bit: int = 128, # Group size for 4bit quantization
     groupsize_2bit: int = 64, # Group size for 2bit quantization

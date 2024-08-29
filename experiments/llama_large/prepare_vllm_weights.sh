@@ -134,7 +134,24 @@ DISC_LR=true
 # done
 
 
-MODEL_DIR=/workspace/models/llama-3-1-8b-dora-ablations/no_adj_20_pct_step_750
+# MODEL_DIR=/workspace/models/llama-3-1-8b-dora-ablations/no_adj_20_pct_step_750
+# python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+# --train_type hqq_dora \
+# --infer_type merged \
+# --model_name $MODEL_NAME \
+# --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+# --config_filename $MODEL_DIR/config.json \
+# --save_dir $MODEL_DIR/merged
+
+# python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+# --train_type hqq_dora \
+# --infer_type bitblas \
+# --model_name $MODEL_NAME \
+# --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+# --config_filename $MODEL_DIR/config.json \
+# --save_dir $MODEL_DIR/vllm_bitblas
+
+MODEL_DIR=/workspace/models/llama-3-1-8b-dora-ablations/adj_20_pct_step500
 python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
 --train_type hqq_dora \
 --infer_type merged \
@@ -142,7 +159,6 @@ python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
 --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
 --config_filename $MODEL_DIR/config.json \
 --save_dir $MODEL_DIR/merged
-
 python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
 --train_type hqq_dora \
 --infer_type bitblas \
