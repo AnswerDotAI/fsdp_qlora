@@ -125,22 +125,21 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                                                             zeros_mode="original",  
                                                             #fast_decoding=True,
                                                         )
-                    matmul_eng_4bit = _get_or_create_bitblas_operator(matmul_config)		
+                    matmul_eng = _get_or_create_bitblas_operator(matmul_config)		
         
-                    Wq_bitblas_4bit = matmul_eng_4bit.transform_weight(W_q_unpacked.reshape(shape))
+                    Wq_bitblas = matmul_eng.transform_weight(W_q_unpacked.reshape(shape))
                     meta_shape_bitblas = (hqq_linear.out_features, hqq_linear.in_features // GROUPSIZE)
-                    scales_bitblas_4bit = scale.view(meta_shape_bitblas)
-                    zeros_bitblas_4bit = zero.view(meta_shape_bitblas)
+                    scales_bitblas = scale.view(meta_shape_bitblas)
+                    zeros_bitblas = zero.view(meta_shape_bitblas)
 
-                    quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas_4bit
-                    quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas_4bit
-                    quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas_4bit
+                    quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas
+                    quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas
+                    quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas
                 elif args["infer_type"] == "merged":
                     lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
                     lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
                     m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")].cuda()
                     rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1)
-                    # TODO: Check if this is correct.
                     merged_weight = ((W_est + lora_b @ lora_a) * rescale.view(-1,1)).detach().cpu() 
                     quantized_state_dict[n] = merged_weight
                 else:
@@ -156,8 +155,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 
             # DoRA weights.
             # import pdb; pdb.set_trace()
-            SKIP_DORA = (args["infer_type"] == "merged" or config_dict['skip_dora_all'] 
-                         or (config_dict['skip_dora_4bit'] and NBITS == 4))
+            SKIP_DORA = (args["infer_type"] == "merged" or config_dict['skip_dora_all'] or (config_dict['skip_dora_4bit'] and NBITS == 4))
             if not SKIP_DORA:
                 lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
                 lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()

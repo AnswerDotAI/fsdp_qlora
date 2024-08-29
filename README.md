@@ -137,6 +137,12 @@ Quantization and utils (hqq comes with bitblas)
 pip install fastcore hqq openai
 ```
 
+Upgrade bitblas
+
+```bash
+pip install -U bitblas
+```
+
 ### Model Download
 
 Download the model weights and configs.
