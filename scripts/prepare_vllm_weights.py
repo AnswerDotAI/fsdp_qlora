@@ -18,6 +18,7 @@ from fastcore.script import *
 from fastcore.parallel import parallel
 import functools
 import torch
+import shutil
 
 from hqq.core.quantize import HQQLinear, BaseQuantizeConfig, Quantizer
 from hqq.backends.torchao import patch_hqq_to_aoint4
@@ -76,7 +77,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 # Block Influence.
                 if any(l + "." in n for l in block_influence_layers):
                     NBITS = 4
-                    GROUPSIZE = config_dict['groupsize_4bit']
+                    GROUPSIZE = config_dict.get('groupsize_4bit', 128)
                     print(f"Block Influence: Setting {n} to 4-bit.")
                     
                 print(f"Quantizing {n} with {NBITS}-bit and groupsize: {GROUPSIZE}.")
@@ -100,7 +101,8 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 if args["infer_type"] == "tinygemm":
                     patched_hqq_linear = patch_hqq_to_aoint4(hqq_linear, None) # patching deletes `hqq_linear.W_q`.
                     quantized_state_dict[n.replace(".weight", ".qweight")] = patched_hqq_linear.weight_int4pack
-                    quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros         
+                    quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros 
+                    print(f"Adding Tinygemm quantized weights for {n}.")
                 # Bitblas weights.
                 elif args["infer_type"] == "bitblas":
                     W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
@@ -135,12 +137,18 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     quantized_state_dict[n.replace(".weight", ".qweight")] = Wq_bitblas
                     quantized_state_dict[n.replace(".weight", ".scales")]  = scales_bitblas
                     quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas
+                    print(f"Adding Bitblas quantized weights for {n}.")
                 elif args["infer_type"] == "merged":
-                    lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
-                    lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
-                    m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")].cuda()
-                    rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1)
-                    merged_weight = ((W_est + lora_b @ lora_a) * rescale.view(-1,1)).detach().cpu() 
+                    if args["disable_dora"]:
+                        merged_weight = W_est.detach().cpu()
+                        print(f"Adding dequantized weights without DoRA for {n}.")
+                    else:
+                        lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
+                        lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
+                        m = dora_weights[n.replace(".weight",".magnitude_layer.magnitude")].cuda()
+                        rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1)
+                        merged_weight = ((W_est + lora_b @ lora_a) * rescale.view(-1,1)).detach().cpu()     
+                        print(f"Merging DoRA weights into the base weights for {n}.")                    
                     quantized_state_dict[n] = merged_weight
                 else:
                     raise ValueError("Invalid inference type.")
@@ -170,10 +178,11 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 quantized_state_dict[n.replace(".weight", ".lora_A")] = lora_a
                 quantized_state_dict[n.replace(".weight", ".lora_B")] = lora_b
                 quantized_state_dict[n.replace(".weight", ".rescale")] = rescale
+                print(f"Adding DoRA weights for {n}.")
             
         elif n in layernorm_layers:
             quantized_state_dict[n] = dora_weights[n]
-            print(f"Replacing {n}.")
+            print(f"Replacing layernorm weights for {n}.")
             
         else:
             quantized_state_dict[n] = p
@@ -182,8 +191,8 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
     # Save quantized state_dict.
     quantized_state_dict = {k:v.contiguous() for k,v in quantized_state_dict.items()}
     save_dir = Path(args["save_dir"])
-    safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}")
-    
+    safetensors.torch.save_file(quantized_state_dict, save_dir/f"{file_shard_name}", metadata={'format': 'pt'})
+
     # Delete the replaced weights.
     if existing_quantized_dir is not None:
         os.remove(existing_quantized_dir/file_shard_name)
@@ -203,6 +212,7 @@ def main(
     dtype: str = None, # Only used when config file doesn't have this info.
     nbits: int = None, # Only used when config file doesn't have this info.
     groupsize: int = None, # Only used when config file doesn't have this info.
+    disable_dora: bool_arg = False,
 ):
     args = dict(locals())
     
@@ -269,7 +279,10 @@ def main(
     idx = hub.cached_file(MODEL_NAME, SAFE_WEIGHTS_INDEX_NAME)
     pretrained_files, _ = hub.get_checkpoint_shard_files(MODEL_NAME, idx)
     
-    dora_weights = safetensors.torch.load_file(args["dora_safetensors_filename"])
+    if args["disable_dora"]:
+        dora_weights = {}
+    else:
+        dora_weights = safetensors.torch.load_file(args["dora_safetensors_filename"])
     
     if config_dict['train_layernorms']:
         layernorm_layers = set([k for k in dora_weights.keys() if "layernorm" in k])
@@ -342,3 +355,13 @@ def main(
     # model_config['rope_scaling'] = {"type" :"dynamic", "factor": 2.0}
     model_config_filename = save_dir/"config.json"
     with open(model_config_filename, "w+") as f: json.dump(model_config, f)
+    
+    # Copy over all other json files from HF model in cache dir.
+    # FIXME: This.
+    # original_model_dir = Path(f"~/.cache/huggingface/hub/models--{MODEL_NAME.replace('/', '--')}/snapshots").ls()[0]
+    # for json_file in original_model_dir.glob("*.json"):
+    #     if json_file.name not in ["config.json"]:
+    #         destination_file = save_dir / json_file.name
+    #         if destination_file.exists():
+    #             destination_file = destination_file.with_name(f"{destination_file.stem}_copy{destination_file.suffix}")
+            # shutil.copy(json_file, destination_file)

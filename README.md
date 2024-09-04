@@ -180,8 +180,19 @@ Example: https://github.com/AnswerDotAI/kerem_research/blob/main/inference_bench
 
 ### Evaluation benchmarks
 
-**TODO:** Add MLMMLU and human eval prompts with lmsys-1m.
+#### Per Token Accuracy / Perplexity
+
+
+#### Academic Benchmarks
 
 Script: https://github.com/AnswerDotAI/kerem_research/blob/main/evaluation_benchmarking/eval.py
 
 Example: https://github.com/AnswerDotAI/kerem_research/blob/main/evaluation_benchmarking/eval.sh
+
+
+#### LMSYS Arena Hard Prompts
+
+
+
+
+

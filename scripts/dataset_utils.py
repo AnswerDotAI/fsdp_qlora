@@ -23,11 +23,12 @@ PROMPT_DICT = {
 
 # Dataset class
 class InstructionDataset(Dataset):
-    def __init__(self, dataset, tokenizer, style="alpaca"):
+    def __init__(self, dataset, tokenizer, style="alpaca", add_special_tokens=True):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.style = style
-
+        self.add_special_tokens = add_special_tokens
+        
     def __len__(self):
         return len(self.dataset)
 
@@ -59,9 +60,9 @@ class InstructionDataset(Dataset):
             example = prompt + ann["output"]
 
         prompt = torch.tensor(
-            self.tokenizer.encode(prompt), dtype=torch.int64
+            self.tokenizer.encode(prompt, add_special_tokens=self.add_special_tokens), dtype=torch.int64
         )
-        example = self.tokenizer.encode(example)
+        example = self.tokenizer.encode(example, add_special_tokens=self.add_special_tokens)
         example.append(self.tokenizer.eos_token_id)
         example = torch.tensor(
             example, dtype=torch.int64
@@ -133,17 +134,17 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
 
     # # Create the InstructionDataset
     if args["dataset"] == "guanaco":
-        dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
+        dataset = InstructionDataset(dataset, tokenizer, style="guanaco", add_special_tokens=True)
     elif args["dataset"] == "sql":
-        dataset = InstructionDataset(dataset, tokenizer, style="qna")
+        dataset = InstructionDataset(dataset, tokenizer, style="qna", add_special_tokens=True)
     elif args["dataset"] == "orca_math":
-        dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
+        dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx", add_special_tokens=True)
     elif args["dataset"] == "orca_math_instruct":
-        dataset = InstructionDataset(dataset, tokenizer, style="local")  
+        dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=True)
     elif is_local:
-        dataset = InstructionDataset(dataset, tokenizer, style="local")
+        dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=False)
     else: # (w/ alpaca prompt formatting)
-        dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
+        dataset = InstructionDataset(dataset, tokenizer, style="alpaca", add_special_tokens=True)
         
 
     # Collate function

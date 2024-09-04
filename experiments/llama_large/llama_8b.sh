@@ -10,18 +10,18 @@
 # --dataset /workspace/data/llama_large_mix_dataset_v0 \
 
 MODEL_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
-# DATASET_NAME=/workspace/data/llama_large_mix_dataset_v1_1536
-DATASET_NAME=orca_math_instruct
+DATASET_NAME=/workspace/data/llama_large_mix_dataset_v1_1536
+# DATASET_NAME=orca_math_instruct
 # DATASET_NAME=dummy
 TARGET_GLOBAL_BS=64
-BS=4
+BS=16
 # Get NUM_GPUS form system
 NUM_GPUS=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader | wc -l)
 GRAD_ACCUM_STEPS=$((TARGET_GLOBAL_BS / (BS * NUM_GPUS)))
 
 CONTEXT_LENGTH=1536
 SAVE_STEPS=125
-STOP_STEP=750
+STOP_STEP=1000
 SAVE_DIR=/workspace/models
 LOG_DIR=/workspace/git/fsdp_qlora/experiments/llama_large/logs
 
@@ -164,30 +164,148 @@ LR_DIV_FACTOR=10
 # --output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-loftq-block-influence 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-loftq-block-influence.log
 
 
-# # Block Influence (No Adj. top 20%) + 4bit (128) 2bit (32)
-# cd /workspace/git/fsdp_qlora && python train.py \
-# --train_type hqq_dora \
-# --nbits mixed \
-# --groupsize_2bit 32 \
-# --block_influence_layers 0,2,7,9,11,31 \
-# --lr $BASE_LR \
-# --lr_div_factor $LR_DIV_FACTOR \
-# --disc_lr $DISC_LR \
-# --train_layernorms $TRAIN_LAYERNORMS \
-# --lora_rank $LORA_RANK \
-# --sharding_strategy full_shard \
-# --model_name $MODEL_NAME \
-# --dataset $DATASET_NAME \
-# --context_length $CONTEXT_LENGTH \
-# --batch_size $BS \
-# --gradient_accumulation_steps 1 \
-# --use_cpu_offload false \
-# --log_to stdout \
-# --verbose true \
-# --save_model true \
-# --save_model_every_n_step $SAVE_STEPS \
-# --stop_training_at_step $STOP_STEP \
-# --output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct.log
+# Block Influence (No Adj. top 20%) + 4bit (128) 2bit (32) (compression 26.2%)
+LORA_RANK=256
+GROUPSIZE_2BIT=32
+cd /workspace/git/fsdp_qlora && python train.py \
+--resumed_step 750 \
+--resume_from_dora_weights /workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-20pct/step_750/model_state_dict.safetensors \
+--resume_from_optimizer /workspace/models/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-256-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-20pct/step_750/optimizer.bin \
+--train_type hqq_dora \
+--nbits mixed \
+--groupsize_2bit $GROUPSIZE_2BIT \
+--block_influence_layers 0,2,7,9,11,31 \
+--lr $BASE_LR \
+--lr_div_factor $LR_DIV_FACTOR \
+--disc_lr $DISC_LR \
+--train_layernorms $TRAIN_LAYERNORMS \
+--lora_rank $LORA_RANK \
+--sharding_strategy full_shard \
+--model_name $MODEL_NAME \
+--dataset $DATASET_NAME \
+--context_length $CONTEXT_LENGTH \
+--batch_size $BS \
+--gradient_accumulation_steps 1 \
+--use_cpu_offload false \
+--log_to stdout \
+--verbose true \
+--save_model true \
+--save_model_every_n_step $SAVE_STEPS \
+--stop_training_at_step $STOP_STEP \
+--output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-gs-$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_gs_$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct.log
+
+# (compression 23.8%)
+LORA_RANK=128
+GROUPSIZE_2BIT=32
+cd /workspace/git/fsdp_qlora && python train.py \
+--train_type hqq_dora \
+--nbits mixed \
+--groupsize_2bit $GROUPSIZE_2BIT \
+--block_influence_layers 0,2,7,9,11,31 \
+--lr $BASE_LR \
+--lr_div_factor $LR_DIV_FACTOR \
+--disc_lr $DISC_LR \
+--train_layernorms $TRAIN_LAYERNORMS \
+--lora_rank $LORA_RANK \
+--sharding_strategy full_shard \
+--model_name $MODEL_NAME \
+--dataset $DATASET_NAME \
+--context_length $CONTEXT_LENGTH \
+--batch_size $BS \
+--gradient_accumulation_steps 1 \
+--use_cpu_offload false \
+--log_to stdout \
+--verbose true \
+--save_model true \
+--save_model_every_n_step $SAVE_STEPS \
+--stop_training_at_step $STOP_STEP \
+--output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-gs-$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_gs_$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct.log
+
+# (compression 22.6%)
+LORA_RANK=64
+GROUPSIZE_2BIT=32
+cd /workspace/git/fsdp_qlora && python train.py \
+--train_type hqq_dora \
+--nbits mixed \
+--groupsize_2bit $GROUPSIZE_2BIT \
+--block_influence_layers 0,2,7,9,11,31 \
+--lr $BASE_LR \
+--lr_div_factor $LR_DIV_FACTOR \
+--disc_lr $DISC_LR \
+--train_layernorms $TRAIN_LAYERNORMS \
+--lora_rank $LORA_RANK \
+--sharding_strategy full_shard \
+--model_name $MODEL_NAME \
+--dataset $DATASET_NAME \
+--context_length $CONTEXT_LENGTH \
+--batch_size $BS \
+--gradient_accumulation_steps 1 \
+--use_cpu_offload false \
+--log_to stdout \
+--verbose true \
+--save_model true \
+--save_model_every_n_step $SAVE_STEPS \
+--stop_training_at_step $STOP_STEP \
+--output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-gs-$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_gs_$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct.log
+
+
+# (compression 21.8%)
+LORA_RANK=128
+GROUPSIZE_2BIT=64
+cd /workspace/git/fsdp_qlora && python train.py \
+--train_type hqq_dora \
+--nbits mixed \
+--groupsize_2bit $GROUPSIZE_2BIT \
+--block_influence_layers 0,2,7,9,11,31 \
+--lr $BASE_LR \
+--lr_div_factor $LR_DIV_FACTOR \
+--disc_lr $DISC_LR \
+--train_layernorms $TRAIN_LAYERNORMS \
+--lora_rank $LORA_RANK \
+--sharding_strategy full_shard \
+--model_name $MODEL_NAME \
+--dataset $DATASET_NAME \
+--context_length $CONTEXT_LENGTH \
+--batch_size $BS \
+--gradient_accumulation_steps 1 \
+--use_cpu_offload false \
+--log_to stdout \
+--verbose true \
+--save_model true \
+--save_model_every_n_step $SAVE_STEPS \
+--stop_training_at_step $STOP_STEP \
+--output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-gs-$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_gs_$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-20pct.log
+
+# (compression 21.9%)
+LORA_RANK=64
+GROUPSIZE_2BIT=64
+cd /workspace/git/fsdp_qlora && python train.py \
+--train_type hqq_dora \
+--nbits mixed \
+--groupsize_2bit $GROUPSIZE_2BIT \
+--block_influence_layers 0,2,4,7,9,11,14,16,22,24,29,31 \
+--lr $BASE_LR \
+--lr_div_factor $LR_DIV_FACTOR \
+--disc_lr $DISC_LR \
+--train_layernorms $TRAIN_LAYERNORMS \
+--lora_rank $LORA_RANK \
+--sharding_strategy full_shard \
+--model_name $MODEL_NAME \
+--dataset $DATASET_NAME \
+--context_length $CONTEXT_LENGTH \
+--batch_size $BS \
+--gradient_accumulation_steps 1 \
+--use_cpu_offload false \
+--log_to stdout \
+--verbose true \
+--save_model true \
+--save_model_every_n_step $SAVE_STEPS \
+--stop_training_at_step $STOP_STEP \
+--output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-gs-$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-40pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_gs_$GROUPSIZE_2BIT-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-40pct.log
+
+
+az vm deallocate --resource-group resource-group-us-central --name llama-training
+
 
 # # Block Influence (Adj. top 20%) + 4bit (128) 2bit (32)
 # # NOTE: NaNs
@@ -250,35 +368,35 @@ LR_DIV_FACTOR=10
 # --stop_training_at_step $STOP_STEP \
 # --output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-30pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-no-adj-30pct.log
 
-# Block Influence (Adj. top 30%) + 4bit (128) 2bit (32)
-# NOTE: CUDA illegal memory access
-cd /workspace/git/fsdp_qlora && python train.py \
---resumed_step 125 \
---dataset_samples 100000 \
---resume_from_dora_weights /workspace/models/llama-3-1-8b-dora-ablations/adj_30_pct_step_125/model_state_dict.safetensors \
---resume_from_optimizer /workspace/models/llama-3-1-8b-dora-ablations/adj_30_pct_step_125/optimizer.bin \
---train_type hqq_dora \
---nbits mixed \
---groupsize_2bit 32 \
---block_influence_layers 0,1,2,7,8,9,10,11,31 \
---lr $BASE_LR \
---lr_div_factor $LR_DIV_FACTOR \
---disc_lr $DISC_LR \
---train_layernorms $TRAIN_LAYERNORMS \
---lora_rank $LORA_RANK \
---sharding_strategy full_shard \
---model_name $MODEL_NAME \
---dataset $DATASET_NAME \
---context_length $CONTEXT_LENGTH \
---batch_size $BS \
---gradient_accumulation_steps 1 \
---use_cpu_offload false \
---log_to stdout \
---verbose true \
---save_model true \
---save_model_every_n_step $SAVE_STEPS \
---stop_training_at_step $STOP_STEP \
---output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-adj-30pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-adj-30pct.log
+# # Block Influence (Adj. top 30%) + 4bit (128) 2bit (32)
+# # NOTE: CUDA illegal memory access
+# cd /workspace/git/fsdp_qlora && python train.py \
+# --resumed_step 125 \
+# --dataset_samples 100000 \
+# --resume_from_dora_weights /workspace/models/llama-3-1-8b-dora-ablations/adj_30_pct_step_125/model_state_dict.safetensors \
+# --resume_from_optimizer /workspace/models/llama-3-1-8b-dora-ablations/adj_30_pct_step_125/optimizer.bin \
+# --train_type hqq_dora \
+# --nbits mixed \
+# --groupsize_2bit 32 \
+# --block_influence_layers 0,1,2,7,8,9,10,11,31 \
+# --lr $BASE_LR \
+# --lr_div_factor $LR_DIV_FACTOR \
+# --disc_lr $DISC_LR \
+# --train_layernorms $TRAIN_LAYERNORMS \
+# --lora_rank $LORA_RANK \
+# --sharding_strategy full_shard \
+# --model_name $MODEL_NAME \
+# --dataset $DATASET_NAME \
+# --context_length $CONTEXT_LENGTH \
+# --batch_size $BS \
+# --gradient_accumulation_steps 1 \
+# --use_cpu_offload false \
+# --log_to stdout \
+# --verbose true \
+# --save_model true \
+# --save_model_every_n_step $SAVE_STEPS \
+# --stop_training_at_step $STOP_STEP \
+# --output_dir $SAVE_DIR/llama-3-1-8b-instruct-dora-4-2bit-lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-adj-30pct 2>&1 | tee $LOG_DIR/llama_3_1_8b_dora_4_2bit_lora_rank-$LORA_RANK-base_lr-$BASE_LR-lr_div_factor-$LR_DIV_FACTOR-train_layernorms-$TRAIN_LAYERNORMS-block-influence-adj-30pct.log
 
 
 
