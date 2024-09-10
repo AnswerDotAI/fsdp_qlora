@@ -100,7 +100,6 @@ huggingface-cli upload answerdotai/Meta-Llama-3-1-405B-Instruct-4-2bit-DoRA /wor
 huggingface-cli upload answerdotai/Meta-Llama-3-1-405B-Instruct-2bit-DoRA /workspace/models/llama-3-1-405b-instruct-hqq-2bit
 ```
 
-
 ## Inference
 
 ### Create new virtual environment

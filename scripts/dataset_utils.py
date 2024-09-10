@@ -142,6 +142,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
     elif args["dataset"] == "orca_math_instruct":
         dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=True)
     elif is_local:
+        # local instruct datasets are already expected to be chat formatted, so we don't add special tokens.
         dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=False)
     else: # (w/ alpaca prompt formatting)
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca", add_special_tokens=True)
