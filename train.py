@@ -307,6 +307,19 @@ class InstructionDataset(Dataset):
         if self.style == "guanaco":
             prompt = self.dataset[index]["text"].split("### Assistant: ")[0]
             example = self.dataset[index]["text"]
+        elif self.style == "llama3":
+            sample = self.dataset[index]
+            if("context" in sample and type(sample['context']) == type("") and len(sample['context']) > 0):
+                prompt_template = '''<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+{context}<|eot_id|><|start_header_id|>user<|end_header_id|>
+{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+'''
+            else:
+                prompt_template = '''<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+'''
+            prompt = prompt_template.format_map(sample)
+            example = prompt + sample['answer']
         elif self.style == "qna":
             prompt_template = "###Context:\n{context}\n###Question:\n{question}\n###Answer:\n"
             sample = self.dataset[index]
@@ -353,7 +366,13 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
     from datasets import Dataset, load_dataset
 
     # Load the source dataset
-    if args["dataset"] == "alpaca":
+    if args["dataset"] == "custom":
+        data_path = "custom.jsonl"
+        dataset = load_dataset("json",data_files=data_path)['train']
+        #for item in dataset:
+        #    print("raw",item)
+        print("len",len(dataset))
+    elif args["dataset"] == "alpaca":
         dataset = load_dataset("yahma/alpaca-cleaned")['train']
     elif args["dataset"] == "alpaca_sample":
         dataset = load_dataset("yahma/alpaca-cleaned", split=f"train[:{args['dataset_samples']}]")
@@ -382,6 +401,8 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
         dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
     elif args["dataset"] == "sql":
         dataset = InstructionDataset(dataset, tokenizer, style="qna")
+    elif args["dataset"] == "custom":
+        dataset = InstructionDataset(dataset, tokenizer, style="llama3")
     elif args["dataset"] == "orca_math":
         dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
     else: # (w/ alpaca prompt formatting)
@@ -1191,7 +1212,7 @@ def main(
     context_length: int = 512, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "custom", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     dataset_samples: int = 512, # Number of samples in an epoch if using "alpaca_sample" or "dummy" dataset
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
