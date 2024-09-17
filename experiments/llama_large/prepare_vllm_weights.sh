@@ -1,6 +1,6 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-SAVE_DIR=/workspace/models
-MODEL_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
+# SAVE_DIR=/workspace/models
+# MODEL_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
 
 # # 4bit HQQ+DORA
 # for step in 250 1000
@@ -29,8 +29,8 @@ MODEL_NAME=meta-llama/Meta-Llama-3.1-8B-Instruct
 # done
 
 # 4/2bit HQQ+DORA (merged)
-TRAIN_LAYERNORMS=true
-DISC_LR=true
+# TRAIN_LAYERNORMS=true
+# DISC_LR=true
 # for LORA_RANK in 64 256 512; do
 #     for BASE_LR in 1e-4 5e-5 2e-5; do
 #         for LR_DIV_FACTOR in 10 3 1; do
@@ -256,12 +256,13 @@ DISC_LR=true
 #     --save_dir $MODEL_DIR/merged
 # done
 
-MODEL_DIR=/workspace/models/llama-3-1-8b-instruct-dora-4-2bit-gs-32-lora_rank-64-base_lr-5e-5-lr_div_factor-10-train_layernorms-true-block-influence-no-adj-20pct/step_125
+MODEL_DIR=/workspace/data/models/Llama-3.1-70B-Instruct-4-2-Bit-BI-20pct
+MODEL_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
 python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
 --train_type hqq_dora \
---infer_type merged \
+--infer_type bitblas \
+--bitblas_dtype bfloat16 \
 --model_name $MODEL_NAME \
 --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
 --config_filename $MODEL_DIR/config.json \
---save_dir $MODEL_DIR/merged_hqq_only \
---disable_dora true
+--save_dir $MODEL_DIR/vllm_bitblas_bf16

@@ -111,13 +111,13 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     zero = zero.to(bitblas_dtype)
         
                     # BitBLAS engine.
-                    print(f"Tuning BitBLAS for {hqq_linear.in_features}x{hqq_linear.out_features}")
+                    print(f"Tuning BitBLAS for {n} with nbits {NBITS}-bit group size {GROUPSIZE} {hqq_linear.in_features}x{hqq_linear.out_features} dtype {bitblas_dtype}")
                     matmul_config = bitblas.MatmulConfig(M=BITBLAS_OPT_M,
                                                             N=hqq_linear.out_features,
                                                             K=hqq_linear.in_features,
-                                                            A_dtype="float16",  
+                                                            A_dtype="bfloat16" if bitblas_dtype == torch.bfloat16 else "float16",  
                                                             W_dtype={4:"uint4",2:"uint2"}[NBITS],
-                                                            accum_dtype="float16",  
+                                                            accum_dtype="float32" if bitblas_dtype == torch.bfloat16 else "float16",
                                                             out_dtype="float16",  
                                                             layout="nt",  
                                                             with_bias=False, 
@@ -209,6 +209,7 @@ def main(
     config_filename: str = None, # Used to get quantization config, might have been saved after training.
     model_name: str = "meta-llama/Llama-2-7b-hf", 
     save_dir: str = "/workspace/models/llama-7b-orca-math-100k-full-quantized",
+    bitblas_dtype: str = None,
     dtype: str = None, # Only used when config file doesn't have this info.
     nbits: int = None, # Only used when config file doesn't have this info.
     groupsize: int = None, # Only used when config file doesn't have this info.
@@ -293,7 +294,7 @@ def main(
     quantized_layers = lora_layers
     
     # Need to cast to half for bitblas.
-    bitblas_dtype = torch.half
+    bitblas_dtype = torch.bfloat16 if args["bitblas_dtype"] == "bfloat16" else torch.float16
    
     # TODO: Separate quantized weights (one time prep) and lora weights.
     # Save quantized weights for a given config only once.
@@ -345,6 +346,8 @@ def main(
         
         quant_config_dict["block_influence_layers"] = block_influence_layers
         quant_config_dict["groupsize_4bit"]         = config_dict['groupsize_4bit']
+        
+        quant_config_dict["bitblas_dtype"] = args["bitblas_dtype"]
         
         quant_config_filename = save_dir/"quantize_config.json"
         with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
