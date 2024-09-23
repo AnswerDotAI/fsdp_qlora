@@ -27,6 +27,8 @@ import bitblas
 from bitblas.cache import global_operator_cache, get_database_path
 from bitblas.module import auto_detect_nvidia_target, BITBLAS_DATABASE_PATH
 
+from gemlite.core import DType, GemLiteLinear
+
 from transformers.utils import logging
 logging.set_verbosity_info()
 logger = logging.get_logger()
@@ -103,6 +105,32 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     quantized_state_dict[n.replace(".weight", ".qweight")] = patched_hqq_linear.weight_int4pack
                     quantized_state_dict[n.replace(".weight", ".scales_and_zeros")] = patched_hqq_linear.scales_and_zeros 
                     print(f"Adding Tinygemm quantized weights for {n}.")
+                    
+                # GemLite weights.
+                elif args["infer_type"] == "gemlite":
+                    W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
+                    scale, zero, shape = hqq_linear.meta['scale'], hqq_linear.meta['zero'], hqq_linear.meta['shape']
+                    scale = scale.to(bitblas_dtype)
+                    zero = zero.to(bitblas_dtype)
+                    
+                    gemlite_linear = GemLiteLinear(
+                        NBITS, #supported: [8, 4, 2, 1]
+                        group_size=GROUPSIZE, # any group_size divisible by 32
+                        in_features=hqq_linear.in_features, # input size
+                        out_features=hqq_linear.out_features, #ouput size
+                        input_dtype=DType.FP16, #FP16 or BF16
+                        output_dtype=DType.FP16, #FP16 or BF16
+                        acc_dtype=DType.FP16, #FP16 or FP32 
+                    )
+
+                    #Packing: we follow the same format as hqq (https://github.com/mobiusml/hqq/)
+                    gemlite_linear.pack(W_q_unpacked, scale, zero)
+
+                    quantized_state_dict[n.replace(".weight", ".qweight")] = gemlite_linear.W_q
+                    quantized_state_dict[n.replace(".weight", ".scales")]  = gemlite_linear.scales
+                    quantized_state_dict[n.replace(".weight", ".zeros")]   = gemlite_linear.zeros
+                    print(f"Adding GemLite quantized weights for {n}.")
+                    
                 # Bitblas weights.
                 elif args["infer_type"] == "bitblas":
                     W_q_unpacked = Quantizer.unpack[hqq_linear.meta['packing']](hqq_linear.W_q)
@@ -156,7 +184,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 assert "qweight" in quantized_state_dict
                 if args["infer_type"] == "tinygemm":
                     assert "scales_and_zeros" in quantized_state_dict
-                elif args["infer_type"] == "bitblas":
+                elif args["infer_type"] in ["bitblas", "gemlite"]:
                     assert "scales" in quantized_state_dict and "zeros" in quantized_state_dict
                 else:
                     raise ValueError("Invalid inference type.")
@@ -203,7 +231,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 @call_parse()
 def main(
     train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # Which quantization strategy to use for inference.
-    infer_type: Param("", choices=["tinygemm", "bitblas", "merged"]) = "tinygemm", # Which kernel strategy to use for inference.
+    infer_type: Param("", choices=["tinygemm", "bitblas", "gemlite", "merged"]) = "tinygemm", # Which kernel strategy to use for inference.
     dora_safetensors_filename: str = None, # Used for lora/dora inference.
     use_existing_from: str = None, # Used to get quantized base weights from a different directory and replace only dora, and finally rename it.
     config_filename: str = None, # Used to get quantization config, might have been saved after training.
@@ -302,7 +330,7 @@ def main(
     quantize_and_save_parallel = functools.partial(quantize_and_save, quantized_layers=quantized_layers, layer_nbits=layer_nbits, layer_groupsizes=layer_groupsizes, 
                                                     dtype=dtype, bitblas_dtype=bitblas_dtype, args=args, dora_weights=dora_weights, layernorm_layers=layernorm_layers, 
                                                     config_dict=config_dict)
-    if args["infer_type"] in ["tinygemm"]:
+    if args["infer_type"] in ["tinygemm", "gemlite"]:
         n_workers = 8
         parallel(quantize_and_save_parallel, pretrained_files, n_workers=n_workers, threadpool=True)
     elif args["infer_type"] in ["bitblas", "merged"]:    
@@ -332,7 +360,7 @@ def main(
         GROUPSIZE = layer_groupsizes["q_proj"]
         quant_config_dict = {"group_size" : GROUPSIZE, "inner_k_tiles" : 8, "lora_rank": lora_rank}
         
-    elif args["infer_type"] == "bitblas":
+    elif args["infer_type"] in ["bitblas", "gemlite"]:
         quant_config_dict = {"group_size" : vllm_group_sizes, "nbits" : vllm_nbits, "lora_rank" : lora_rank}
             
     # skipped_dora_layers

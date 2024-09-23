@@ -256,13 +256,23 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 #     --save_dir $MODEL_DIR/merged
 # done
 
+# MODEL_DIR=/workspace/data/models/Llama-3.1-70B-Instruct-4-2-Bit-BI-20pct
+# MODEL_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
+# python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
+# --train_type hqq_dora \
+# --infer_type bitblas \
+# --bitblas_dtype bfloat16 \
+# --model_name $MODEL_NAME \
+# --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
+# --config_filename $MODEL_DIR/config.json \
+# --save_dir $MODEL_DIR/vllm_bitblas_bf16
+
 MODEL_DIR=/workspace/data/models/Llama-3.1-70B-Instruct-4-2-Bit-BI-20pct
 MODEL_NAME=meta-llama/Meta-Llama-3.1-70B-Instruct
 python /workspace/git/fsdp_qlora/scripts/prepare_vllm_weights.py \
 --train_type hqq_dora \
---infer_type bitblas \
---bitblas_dtype bfloat16 \
+--infer_type gemlite \
 --model_name $MODEL_NAME \
 --dora_safetensors_filename $MODEL_DIR/model_state_dict.safetensors \
 --config_filename $MODEL_DIR/config.json \
---save_dir $MODEL_DIR/vllm_bitblas_bf16
+--save_dir $MODEL_DIR/vllm_gemlite_fp16
