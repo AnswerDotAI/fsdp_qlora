@@ -63,7 +63,7 @@ def replace_linear(model:nn.Module,
     return model
 
 
-def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.device=None, dtype:torch.dtype=None,
+def load_and_quantize(module:nn.Module, name:str, value:Tensor, bias:Tensor, device:torch.device=None, dtype:torch.dtype=None,
                       skip_names:list[str]=[], to_cpu:bool=False, to_meta:bool=False, verbose:bool=False, 
                       loftq_init:bool=False, lora_rank:int=64):
     """
@@ -125,13 +125,19 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
 
                 if to_meta:
                     setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("meta")))
+                    if bias is not None:
+                        setattr(submodule, "bias", nn.Parameter(bias.to("meta")))
                 elif to_cpu:
                     setattr(submodule, "W_q", nn.Parameter(submodule.W_q.to("cpu")))
+                    if bias is not None:
+                        setattr(submodule, "bias", nn.Parameter(bias.to("cpu")))
                 
                 submodule.in_gpu = False
         else:
             param = submodule.get_parameter(value_key)
             value = type(param)(place_on_device(value).data)     
+            if bias is not None:
+                bias = type(param)(place_on_device(bias).data)
                        
     except AttributeError:
         # it's a buffer
@@ -140,6 +146,8 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
     
     if HQQLinear is None or not isinstance(submodule, HQQLinear):
         setattr(submodule, value_key, value)
+        if bias is not None:
+            setattr(submodule, "bias", bias)
         
     
 def get_lowrank_tuple_torch_gpu(tensor, max_rank, eps=None):

@@ -347,8 +347,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
     # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage
     def load_and_quantize_parallel(name_param, model, **kwargs):
-        name, param = name_param
-        load_and_quantize(model, name, param, **kwargs)
+        name, (param, bias_param) = name_param
+        load_and_quantize(model, name, param, bias_param, **kwargs)
 
     param_count = sum((p.numel() for n,p in model.named_parameters()))
     if rank == 0 or args['verbose']:
@@ -364,6 +364,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     start = time.time()
     for filename in tqdm(files, desc="Loading & Quantizing Model Shards", disable=rank!=0, position=0):
         weights = safetensors.torch.load_file(filename)
+        # Group weights and biases together.
+        weights_copy = {}
+        for name, param in iter(weights.items()):
+            bias_param = None
+            if name.endswith(".bias"): continue
+            if name.endswith(".weight"):
+                bias_name = name.replace(".weight", ".bias")
+                if bias_name in weights:
+                    bias_param = weights[bias_name]
+            weights_copy[name] = (param, bias_param)
+        weights = weights_copy
         
         # ### DEBUG ###
         # # remove all other layers but first.
