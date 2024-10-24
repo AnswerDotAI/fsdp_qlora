@@ -107,6 +107,8 @@ except ImportError:
 sys.path.append("./scripts")
 from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
 from lora import LORA
+from scripts.train_utils import get_wrapping_policy
+from dataset_utils import get_dataloader
 
 from profiling_utils import profiling_context
 
@@ -277,141 +279,6 @@ def load_and_quantize(module:nn.Module, name:str, value:Tensor, device:torch.dev
         setattr(submodule, value_key, value)
 
 
-# DATASET + DATALOADERS (modified from llama recipes)
-# Formatting prompts in alpaca
-PROMPT_DICT = {
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-}
-
-# Dataset class
-class InstructionDataset(Dataset):
-    def __init__(self, dataset, tokenizer, style="alpaca"):
-        self.dataset = dataset
-        self.tokenizer = tokenizer
-        self.style = style
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        IGNORE_INDEX = -100  # The default setting in CrossEntropyLoss
-        if self.style == "guanaco":
-            prompt = self.dataset[index]["text"].split("### Assistant: ")[0]
-            example = self.dataset[index]["text"]
-        elif self.style == "qna":
-            prompt_template = "###Context:\n{context}\n###Question:\n{question}\n###Answer:\n"
-            sample = self.dataset[index]
-            prompt = prompt_template.format_map(sample)
-            example = prompt + sample['answer']
-        elif self.style == "qna_no_ctx":
-            prompt_template = "###Question:\n{question}\n###Answer:\n"
-            sample = self.dataset[index]
-            prompt = prompt_template.format_map(sample)
-            example = prompt + sample['answer']
-        else: # Alpaca
-            ann = self.dataset[index]
-            if ann.get("input", "") == "":
-                prompt = PROMPT_DICT["prompt_no_input"].format_map(ann)
-            else:
-                prompt = PROMPT_DICT["prompt_input"].format_map(ann)
-            example = prompt + ann["output"]
-
-        prompt = torch.tensor(
-            self.tokenizer.encode(prompt), dtype=torch.int64
-        )
-        example = self.tokenizer.encode(example)
-        example.append(self.tokenizer.eos_token_id)
-        example = torch.tensor(
-            example, dtype=torch.int64
-        )
-        labels = copy.deepcopy(example)
-        labels[: len(prompt)] = -1
-        example_mask = example.ge(0)
-        label_mask = labels.ge(0)
-        example[~example_mask] = 0
-        labels[~label_mask] = IGNORE_INDEX
-
-        return {
-            "input_ids": example.tolist(),
-            "labels": labels.tolist(),
-            "attention_mask":example_mask.tolist(),
-        }
-
-# And to get the dataloader
-def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict):
-    """Creates a dataset and appropriate dataloader with distributed sampler."""
-    # Importing here rather than at the start to avoid multiprocessing issues
-    from datasets import Dataset, load_dataset
-
-    # Load the source dataset
-    if args["dataset"] == "alpaca":
-        dataset = load_dataset("yahma/alpaca-cleaned")['train']
-    elif args["dataset"] == "alpaca_sample":
-        dataset = load_dataset("yahma/alpaca-cleaned", split=f"train[:{args['dataset_samples']}]")
-    elif args["dataset"] == "dummy":
-        dataset = Dataset.from_dict({
-            'instruction': ["instruction"]*args["dataset_samples"],
-            'input': ["input"]*args["dataset_samples"],
-            'output': ["output"*args["context_length"]*2]*args["dataset_samples"]} # A long output to test memory usage (gets truncated)
-        )
-    elif args["dataset"] == "guanaco":
-        dataset = load_dataset("timdettmers/openassistant-guanaco", split="train")
-    elif args["dataset"] == "sql":
-        dataset = load_dataset("knowrohit07/know_sql")['validation']
-        dataset = dataset.shuffle(seed=args["seed"])
-        dataset = dataset.select(range(1000,len(dataset)))
-    elif args["dataset"] == "orca_math":
-        dataset = load_dataset("microsoft/orca-math-word-problems-200k")['train'].shuffle(seed=42)
-        # train with 10k for starters. Then 100k.
-        dataset = dataset.select(range(0,args['dataset_samples']))
-
-    # truncate dataset so it's evenly divisible by grad_accumulation_steps
-    dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
-
-    # # Create the InstructionDataset
-    if args["dataset"] == "guanaco":
-        dataset = InstructionDataset(dataset, tokenizer, style="guanaco")
-    elif args["dataset"] == "sql":
-        dataset = InstructionDataset(dataset, tokenizer, style="qna")
-    elif args["dataset"] == "orca_math":
-        dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx")
-    else: # (w/ alpaca prompt formatting)
-        dataset = InstructionDataset(dataset, tokenizer, style="alpaca")
-
-    # Collate function
-    def collate_fn(batch, with_attention_mask=False):
-        # To list of tensors
-        input_ids = [torch.tensor(item['input_ids']) for item in batch]
-        attention_masks = [torch.tensor(item['attention_mask']) for item in batch]
-        labels = [torch.tensor(item['labels']) for item in batch]
-        # Pad + truncate
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)[:, :args["context_length"]]
-        if with_attention_mask:
-            attention_masks = pad_sequence(attention_masks, batch_first=True, padding_value=0)[:, :args["context_length"]]
-        else:
-            attention_masks = None
-        labels = pad_sequence(labels, batch_first=True, padding_value=-100)[:, :args["context_length"]]
-        # Return dict
-        return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
-
-    # For distributed training, use DistributedSampler
-    sampler = DistributedSampler(dataset, seed=args["seed"])
-
-    # Use the custom collate function in DataLoader
-    dataloader = DataLoader(dataset, batch_size=args["batch_size"], collate_fn=collate_fn, sampler=sampler)
-
-    return dataloader
-
-
 # LR scheduler.
 def _get_cosine_one_cycle_lr_lambda(
     current_step: int, *, num_warmup_steps: int, num_training_steps: int, min_lr_fraction = 0.1,
@@ -461,46 +328,6 @@ def get_optimizer(model:nn.Module, args:Dict):
                                  eps=1e-5, weight_decay=args['wd'], fused=args["optimizer"]=="fused_adamw")
     else:
         raise ValueError("Invalid optimizer")
-
-
-# Wrap the model using LoRA policy from llama-recipes or custom policy:
-# This checks for lora layers (has weight and requires_grad)
-def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
-    from peft.tuners import PrefixEncoder, PromptEmbedding, PromptEncoder
-
-    if custom_policy:
-        def lambda_policy_fn(module):
-            # LoRA and DoRA trainable layers.
-            return (isinstance(module, nn.Sequential) and all(m.weight.requires_grad for m in module)) or (isinstance(module, (DORALayer, MagnitudeLayer)))
-    else:
-        def lambda_policy_fn(module):
-            return (
-                len(list(module.named_children())) == 0
-                and getattr(module, "weight", None) is not None
-                and module.weight.requires_grad
-            )
-    def self_attn_policy_fn(module):
-        # Check module name is self_attn.
-        return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values())))
-
-    def mlp_policy_fn(module):
-        # Check module name is self_attn.
-        return isinstance(module, (LlamaMLP, MistralMLP))
-
-    lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
-    self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
-    mlp_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=mlp_policy_fn)
-    transformer_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer),
-    )
-    if vanilla_policy:
-        return transformer_wrap_policy
-
-    policies=[lambda_policy, transformer_wrap_policy]
-    if custom_policy:
-        policies.extend([self_attn_policy, mlp_policy])
-    return functools.partial(_or_policy, policies=policies)
 
 
 # Main function, run on each process
@@ -558,7 +385,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     tokenizer.pad_token_id = tokenizer.eos_token_id # TODO check if it exists first
 
     # Set up dataloader
-    dataloader = get_dataloader(tokenizer, args)
+    dataloader = get_dataloader(tokenizer, args, pad_to_nearest=False)
 
 
     # Create model
@@ -567,23 +394,34 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
     if args["train_type"] in ["full", "lora", "custom_lora"]:
+        cfg = AutoConfig.from_pretrained(args["model_name"])
+        cfg.use_cache = False
+        cfg._attn_implementation = attn_impl
+        cfg.torch_dtype = torch_dtype
+        cfg.use_fp8_kv_scale = args["fp8_kv_enabled"]
+        cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
+        # DEBUG BEGIN 
+        # cfg.num_hidden_layers = 2
+        # DEBUG END
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
-            model = AutoModelForCausalLM.from_pretrained(
-                args["model_name"],
-                use_cache=False,
-                torch_dtype=torch_dtype,
-                _attn_implementation=attn_impl
-            )
+            model = AutoModelForCausalLM.from_config(cfg)
             dtype = torch_dtype if args["precision"] == "bf16" else None
             model.to(dtype=dtype, device="cpu" if args["low_memory"] else rank)
         else:
-            cfg = AutoConfig.from_pretrained(args["model_name"])
-            cfg.use_cache = False
-            cfg._attn_implementation = attn_impl
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
             if args["precision"] == "bf16":
                 model.to(torch_dtype)
+        # Assert attn implementation is set correctly from the layer
+        attn_impl_name = model.model.layers[0].self_attn.__class__.__name__.lower()
+        if attn_impl == "sdpa":
+            assert "sdpa" in attn_impl_name
+        elif attn_impl == "flash_attention_2":
+            assert "flash" in attn_impl_name
+        elif attn_impl == "eager":
+            assert ("sdpa" not in attn_impl_name and "flash" not in attn_impl_name)
+        else:
+            raise ValueError(f"Invalid attn implementation: {attn_impl}")                
     elif args["train_type"] in ["qlora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]: # Our custom loading
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
@@ -1039,7 +877,7 @@ def fsdp_qlora(
     train_type: str = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     llama_pro_path: str = None, # Path to the quantized llama pro model
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
-    context_length: int = 512, # Max length of input sequence (in tokens)
+    context_length: int = 2048, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
     dataset: str = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
@@ -1053,6 +891,8 @@ def fsdp_qlora(
     no_sync: bool = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: str = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
+    cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
     save_model: bool = False, # Save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
@@ -1188,10 +1028,10 @@ def main(
     train_type: Param("", choices=["full", "lora", "qlora", "custom_qlora", "custom_lora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]) = "qlora", # "full", "lora", "qlora", or "custom_qlora"
     llama_pro_path: str = None, # Path to the quantized llama pro model
     batch_size: int = 1, # Batch size per GPU. Effective BS = batch_size * world_size * gradient_accumulation_steps
-    context_length: int = 512, # Max length of input sequence (in tokens)
+    context_length: int = 2048, # Max length of input sequence (in tokens)
     gradient_accumulation_steps: int = 1, # How many steps to accumulate gradients over (increases effective batch size)
     num_epochs: int = 1, # How many epochs of training to do
-    dataset: Param("", choices=["alpaca", "alpaca_sample", "dummy", "guanaco", "sql", "orca_math"]) = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
+    dataset: Param("") = "alpaca_sample", # alpaca, alpaca_sample (for a 128-sample test) or "dummy" for 16 long dummy samples
     dataset_samples: int = 512, # Number of samples in an epoch if using "alpaca_sample" or "dummy" dataset
     sharding_strategy: Param("", choices=["full_shard", "shard_grad_op", "ddp", "hybrid_full_shard", "hybrid_shard_grad_op"]) = "full_shard", # Sharding strategy for FSDP
     use_gradient_checkpointing: bool_arg = True, # Use FSDP's activation checkpointing
@@ -1202,6 +1042,8 @@ def main(
     no_sync: bool_arg = False, # Prevent gradient sync until update step. Likely uses more memory. Required for `use_cpu_offload` and `gradient_accumulation_steps > 1`
     precision: Param("", choices=["fp32", "bf16", "fp16_autocast", "bf16_autocast", "bf16_buffers_autocast"]) = "bf16", # Training precision. autocast precisions use mixed precision
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    fp8_kv_enabled: bool_arg = False, # Whether to use FP8 KV caching
+    cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
     save_model: bool_arg = False, # Save the resulting model
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
