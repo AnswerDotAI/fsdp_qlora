@@ -31,4 +31,8 @@ cd $HOME/git/fsdp_qlora && python train.py \
 --log_to wandb \
 --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1536 \
 --verbose true \
---low_memory true
+--low_memory true \
+--save_model true \
+--output_dir $HOME/models/qwen_cla_fp8kv_debug \
+--save_model_every_n_step 5 \
+--stop_training_at_step 10

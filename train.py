@@ -330,6 +330,71 @@ def get_optimizer(model:nn.Module, args:Dict):
         raise ValueError("Invalid optimizer")
 
 
+def save_model(rank:int, model:nn.Module, args:Dict, new_layer_names:list[str], step:int=None):
+    
+    if step is None:
+        output_dir = args["output_dir"]
+    else:
+        output_dir = os.path.join(args["output_dir"], f"step_{step}")
+    
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    dist.barrier()
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]:
+        cpu_state_dict = {}
+        if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
+            trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(tuple(new_layer_names))]
+        else:
+            trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
+        for prefix, module in trainable_fsdp_modules:
+            prefix = (prefix.replace("_fsdp_wrapped_module.", "")
+                            .replace("_checkpoint_wrapped_module.", "")
+                            .replace("_offload_wrapped_module.", ""))
+            if args['verbose']: print(f"Saving {prefix}")
+            with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
+                cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
+            dist.barrier()
+            torch.cuda.synchronize()
+        if rank==0:
+            print("Saving trained LoRA weights.")
+            save_file(cpu_state_dict, os.path.join(output_dir, "model_state_dict.safetensors"))
+            print("Done", rank)
+    else:
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+            cpu_state_dict = model.state_dict()
+            if rank==0:
+                print("Saving full model weights.")
+                # TODO: Save model in original sharded format.
+                save_file(cpu_state_dict, os.path.join(output_dir, "model_state_dict.safetensors"))
+                print("Done", rank)    
+
+
+def save_optimizer(rank, model, optimizer, args, step=None):
+    
+    if step is None:
+        output_dir = args["output_dir"]
+    else:
+        output_dir = os.path.join(args["output_dir"], f"step_{step}")
+    
+    if rank == 0:
+        os.makedirs(output_dir, exist_ok=True)
+    
+    dist.barrier()
+    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):    
+        optim_state_dict = FSDP.optim_state_dict(model, optimizer)
+        dist.barrier()
+        torch.cuda.synchronize()
+        
+    if rank==0:
+        print("Saving optimizer state.")
+        optimizer_filename = os.path.join(output_dir, "optimizer.bin")
+        torch.save(optim_state_dict, optimizer_filename)
+        print("Done", rank)
+
+
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
@@ -401,7 +466,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_fp8_kv_scale = args["fp8_kv_enabled"]
         cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
         # DEBUG BEGIN 
-        # cfg.num_hidden_layers = 2
+        # cfg.num_hidden_layers = 4
         # DEBUG END
         if (args["low_memory"] and rank == 0) or (not args["low_memory"]):
             model = AutoModelForCausalLM.from_config(cfg)
@@ -568,6 +633,13 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
 
 
+    if rank == 0 and args["resume_from_weights"]:
+        # Load dora weights.
+        dora_weights = safetensors.torch.load_file(args["resume_from_weights"])
+        for name, param in dora_weights.items():
+            model.load_state_dict({name: param}, strict=False)
+    dist.barrier()
+
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"],
                                                 vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
@@ -644,6 +716,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Create the optimizer
     optimizer = get_optimizer(model, args)
+    
+    if args['resume_from_optimizer']:
+        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
+            # Load optimizer state.
+            print("Loading optimizer state.")
+            optim_state_dict = torch.load(args["resume_from_optimizer"])            
+            flattened_osd = FSDP.optim_state_dict_to_load(model=model, optim=optimizer, optim_state_dict=optim_state_dict)
+            optimizer.load_state_dict(flattened_osd)    
 
     # LR scheduler.
     gradient_accumulation_steps = max(1, args['gradient_accumulation_steps'])
@@ -672,6 +753,20 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
+    current_training_step = 0
+    
+    if args["resume_from_weights"] is not None:
+        if args["resumed_step"] is not None:
+            resumed_step = args["resumed_step"]
+        else:
+            resumed_step = int(Path(args["resume_from_weights"]).parent.stem.split("_")[1])
+        if args["verbose"] and rank == 0:
+            print(f"Resuming training from step {resumed_step}")
+    else:
+        resumed_step = None    
+    
+    
+    
     # Reset peak memory to track that
     torch.cuda.reset_peak_memory_stats(local_rank)
     with profiling_context(args, rank=rank) as prof:
@@ -683,6 +778,15 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             for batch_idx, batch in enumerate(dataloader):
 
                 accumulate_grads = (batch_idx+1) % gradient_accumulation_steps == 0
+                
+                # skip steps if resuming from a checkpoint.
+                if (resumed_step is not None) and (current_training_step < resumed_step):
+                    if accumulate_grads:
+                        current_training_step += 1
+                        progress_bar.update(1)
+                        if lr_scheduler is not None:
+                            lr_scheduler.step()
+                    continue                
 
                 # Prevent gradient syncing until update step if using no_sync option.
                 # Documentation states this should only be used on the root FSDP instance
@@ -750,6 +854,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     if lr_scheduler is not None:
                         lr_scheduler.step()
                     progress_bar.update(1)
+                    current_training_step += 1
 
                 # Log memory usage after backward
                 if batch_idx == 0 and epoch == 0 and (rank == 0 or args['verbose']):
@@ -781,6 +886,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         if args["log_to"] == 'wandb':
                             logger.log({"loss": log_loss, "lr": log_lr}, rank)
                     ddp_loss = torch.zeros(2).to(local_rank)
+
+                # Save model every_n steps.
+                if accumulate_grads and args["save_model"] and (current_training_step % args["save_model_every_n_step"] == 0):
+                    print(f"Saving model at step {current_training_step}")
+                    new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
+                    save_model(rank, model, args, new_layer_names, step=current_training_step)
+                    save_optimizer(rank, model, optimizer, args, step=current_training_step)            
+
+                if args["stop_training_at_step"] is not None and current_training_step >= args["stop_training_at_step"]:
+                    print(f"Stopping training at step {current_training_step}")
+                    sys.exit(0)                            
 
                 if rank == 0 and args['verbose']:
                     print(f"Batch idx {batch_idx}")
@@ -831,36 +947,9 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # It might be better to just save the trained lora layers.
     # summon_full_params on lora layers and save.
     if args["save_model"]:
-        if rank == 0:
-            os.makedirs(args["output_dir"], exist_ok=True)
-        dist.barrier()
-        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        if args["train_type"] in ["custom_lora", "custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora", "bnb_llama_pro", "hqq_llama_pro"]:
-            cpu_state_dict = {}
-            if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
-                trainable_fsdp_modules =[(n,m) for n,m in model.named_modules() if n.endswith(tuple(new_layer_names))]
-            else:
-                trainable_fsdp_modules = [(n,m) for n,m in model.named_modules() if n.endswith(('lora_AB', 'dora_layer', 'magnitude_layer'))]
-            for prefix, module in trainable_fsdp_modules:
-                prefix = (prefix.replace("_fsdp_wrapped_module.", "")
-                                .replace("_checkpoint_wrapped_module.", "")
-                                .replace("_offload_wrapped_module.", ""))
-                if args['verbose']: print(f"Saving {prefix}")
-                with FSDP.state_dict_type(module, StateDictType.FULL_STATE_DICT, save_policy):
-                    cpu_state_dict = {**cpu_state_dict, **{f"{prefix}.{k}":v for k,v in module.state_dict().items()}}
-                dist.barrier()
-                torch.cuda.synchronize()
-            if rank==0:
-                print("Saving trained LoRA weights.")
-                save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                print("Done", rank)
-        else:
-            with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-                cpu_state_dict = model.state_dict()
-                if rank==0:
-                    print("Saving full model weights.")
-                    save_file(cpu_state_dict, os.path.join(args["output_dir"], "model_state_dict.safetensors"))
-                    print("Done", rank)
+        new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
+        save_model(rank, model, args, new_layer_names, step=None)
+        save_optimizer(rank, model, optimizer, args, step=None)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
@@ -894,6 +983,11 @@ def fsdp_qlora(
     fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
     save_model: bool = False, # Save the resulting model
+    save_model_every_n_step: int = 1000, # Save the model every n steps
+    resume_from_weights: str = None, # Resume training from a checkpoint
+    resume_from_optimizer: str = None, # Resume training from a checkpoint
+    resumed_step: int = None, # Step to resume training from    
+    stop_training_at_step: int = None, # Stop training at a specific step
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
@@ -1045,6 +1139,11 @@ def main(
     fp8_kv_enabled: bool_arg = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
     save_model: bool_arg = False, # Save the resulting model
+    save_model_every_n_step: int = 1000, # Save the model every n steps
+    resume_from_weights: str = None, # Resume training from a checkpoint
+    resume_from_optimizer: str = None, # Resume training from a checkpoint
+    resumed_step: int = None, # Step to resume training from    
+    stop_training_at_step: int = None, # Stop training at a specific step
     output_dir: str = "output", # Output directory to save the final model to
     lora_rank: int = 64, # LoRA rank for lora/qlora
     lora_alpha: int = 16, # LoRA alpha for lora/qlora
