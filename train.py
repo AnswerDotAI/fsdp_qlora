@@ -113,6 +113,15 @@ from dataset_utils import get_dataloader
 from profiling_utils import profiling_context
 
 
+# LIGER kernels.
+try:
+    from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen2
+    apply_liger_kernel_to_llama()
+    apply_liger_kernel_to_qwen2()
+except ImportError:
+    print("See https://github.com/linkedin/Liger-Kernel to use LIGER kernels.")
+
+
 class Logger:
     def __init__(self, args, log_to="stdout", project_name="fsdp_qlora", entity=None, group=None, name=None, rank=0):
         # self.log_every_n_steps = log_every_n_steps TODO: add this back as an option
@@ -409,6 +418,21 @@ def get_model_files(model_name):
             raise e
     return files
 
+
+def create_compute_new_kv_map(cla_kv_cache_map) -> dict[int, bool]:
+    "Returns a dict of decoder layer idxs and whether KV needs to be computed at that layer to be cached."
+    if cla_kv_cache_map is None: return {}
+    comput_new_kv_map = {}
+    is_seen = set()
+    for k,v in cla_kv_cache_map.items():
+        if v not in is_seen:
+            comput_new_kv_map[k] = True
+            is_seen.add(v)
+        else:
+            comput_new_kv_map[k] = False
+    return comput_new_kv_map
+
+
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
@@ -469,7 +493,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
     # Create model
     cfg = None
-    attn_impl = "sdpa" # torch 2.2 sdpa uses flash attn 2
+    attn_impl = "flash_attention_2" # torch 2.2 sdpa uses flash attn 2
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
     if args["train_type"] in ["full", "lora", "custom_lora"]:
@@ -635,7 +659,27 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     print("Trainable Llama-Pro layer", n)
             else:
                 p.requires_grad = False
-
+                
+    elif (args["train_type"] in ["full"]) and args["cla_kv_cache_map"] is not None:
+        compute_new_kv_map = create_compute_new_kv_map(cfg.cla_kv_cache_map)
+        for n,p in model.named_parameters():
+            if "layers" in n:
+                layer_idx = int(n.split('.')[2])
+                if compute_new_kv_map[layer_idx]:
+                    p.requires_grad = False
+                    if rank == 0: print("Frozen layer", n)
+                else:
+                    p.requires_grad = True
+                    if rank == 0: print("Trainable layer", n)
+            elif "embed_tokens" in n:
+                p.requires_grad = False
+                if rank == 0: print("Frozen layer", n)
+            else:
+                p.requires_grad = True
+                if rank == 0: print("Trainable layer", n)
+                    
+                    
+                    
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank)
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
@@ -651,6 +695,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # Wrap model with llama-recipies or custom LoRA policy
     my_auto_wrap_policy = get_wrapping_policy(custom_policy=args["train_type"] in ["custom_qlora", "hqq_lora", "hqq_dora", "bnb_dora"],
                                                 vanilla_policy=args["train_type"] in ["full", "bnb_llama_pro", "hqq_llama_pro"])
+    
+    print(f"Forward class: {model.forward}")
 
     if rank == 0 or args['verbose']:
         print("Wrapping model w/ FSDP", rank)
@@ -673,7 +719,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
         # backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
-        use_orig_params=False,
+        use_orig_params=(args["train_type"] in ["full"] and args["cla_kv_cache_map"] is not None),
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
@@ -816,6 +862,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         logger.log({"memory/allocated_before_forward": torch.cuda.memory_allocated(local_rank)}, rank)
                         logger.log({"memory/reserved_before_forward": reserved_before_forward}, rank)
 
+
+                print(f"Batch shape: {batch['input_ids'].shape}")
                 # Forward pass
                 with sync_context:
                     with autocast:
