@@ -395,6 +395,20 @@ def save_optimizer(rank, model, optimizer, args, step=None):
         print("Done", rank)
 
 
+def get_model_files(model_name):
+    try:
+        idx = hub.cached_file(model_name, SAFE_WEIGHTS_INDEX_NAME)
+        files, _ = hub.get_checkpoint_shard_files(model_name, idx)
+    except OSError:
+        try:
+            # This means the model doesn't have a model.safetensors.index.json because it is not sharded
+            files = []
+            files.append(hub.cached_file(model_name, SAFE_WEIGHTS_NAME))
+        except OSError as e:
+            # This means the model probably doesn't have a safetensors file
+            raise e
+    return files
+
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
@@ -472,6 +486,10 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             model = AutoModelForCausalLM.from_config(cfg)
             dtype = torch_dtype if args["precision"] == "bf16" else None
             model.to(dtype=dtype, device="cpu" if args["low_memory"] else rank)
+            files = get_model_files(args["model_name"])
+            for file in tqdm(files):
+                weights = safetensors.torch.load_file(file)
+                model.load_state_dict(weights, strict=False)
         else:
             with init_empty_weights():
                 model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch_dtype)
@@ -523,17 +541,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             files = glob(str(llama_pro_path/"*.safetensors"))
         else:
-            try:
-                idx = hub.cached_file(args["model_name"], SAFE_WEIGHTS_INDEX_NAME)
-                files, _ = hub.get_checkpoint_shard_files(args["model_name"], idx)
-            except OSError:
-                try:
-                    # This means the model doesn't have a model.safetensors.index.json because it is not sharded
-                    files = []
-                    files.append(hub.cached_file(args["model_name"], SAFE_WEIGHTS_NAME))
-                except OSError as e:
-                    # This means the model probably doesn't have a safetensors file
-                    raise e
+            files = get_model_files(args["model_name"])
 
         # Load in the weights, using our custom load_and_quantize method which quantizes Params4bit on the fly
         # and then places each layer on CPU or meta if using low_memory to minimize GPU memory usage

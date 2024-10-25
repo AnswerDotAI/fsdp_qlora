@@ -13,7 +13,7 @@ CLA3_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 8, 11
 CLA3_NO_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7, 11: 7, 12: 7, 13: 7, 14: 7, 15: 7, 16: 7, 17: 7, 18: 7, 19: 7, 20: 7, 21: 7, 22: 7, 23: 7, 24: 7, 25: 7, 26: 7, 27: 7, 28: 8, 29: 8, 30: 9, 31: 9, 32: 10, 33: 10, 34: 11, 35: 11, 36: 12, 37: 12, 38: 12, 39: 12, 40: 12, 41: 12, 42: 12, 43: 12, 44: 13, 45: 13, 46: 14, 47: 14, 48: 14, 49: 15, 50: 15, 51: 16, 52: 16, 53: 17, 54: 17, 55: 17, 56: 17, 57: 17, 58: 17, 59: 17, 60: 17, 61: 18, 62: 19, 63: 20}'
 
 # --cla_kv_cache_map "$CLA2_ADJ" \
-# --project_name qwen_cla_fp8kv \
+# --fp8_kv_enabled true \
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 cd $HOME/git/fsdp_qlora && python train.py \
@@ -29,6 +29,7 @@ cd $HOME/git/fsdp_qlora && python train.py \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \
 --log_to wandb \
+--project_name qwen_cla_fp8kv \
 --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1536 \
 --verbose true \
 --low_memory true \
