@@ -15,29 +15,32 @@ CLA3_NO_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7,
 # --cla_kv_cache_map "$CLA2_ADJ" \
 # --fp8_kv_enabled true \
 
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
 HOME=/workspace
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-cd $HOME/git/fsdp_qlora && python train.py \
---world_size 4 \
---master_port 12356 \
---model_name Qwen/Qwen2.5-32B-Instruct \
---cla_kv_cache_map "$CLA2_ADJ" \
---fp8_kv_enabled true \
---train_type full \
---sharding_strategy full_shard \
---precision bf16 \
---gradient_accumulation_steps 8 \
---batch_size 1 \
---context_length 512 \
---use_gradient_checkpointing true \
---use_cpu_offload false \
---log_to wandb \
---project_name qwen_cla_fp8kv \
---dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
---verbose true \
---low_memory true \
---save_model true \
---output_dir $HOME/models/qwen_cla_fp8kv_debug \
---save_model_every_n_step 5 \
---stop_training_at_step 10
+for CLA_METHOD in CLA2_ADJ CLA2_NO_ADJ CLA3_ADJ CLA3_NO_ADJ; do
+  cd $HOME/git/fsdp_qlora && python train.py \
+  --world_size 4 \
+  --master_port 12356 \
+  --model_name Qwen/Qwen2.5-32B-Instruct \
+  --cla_kv_cache_map "$(eval echo \$$CLA_METHOD)" \
+  --fp8_kv_enabled true \
+  --train_type full \
+  --sharding_strategy full_shard \
+  --precision bf16 \
+  --gradient_accumulation_steps 4 \
+  --batch_size 2 \
+  --context_length 1536 \
+  --use_gradient_checkpointing true \
+  --use_cpu_offload false \
+  --log_to wandb \
+  --project_name qwen_cla_fp8kv \
+  --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1536 \
+  --verbose true \
+  --low_memory true \
+  --save_model true \
+  --output_dir $HOME/models/qwen_cla_fp8kv_$(echo $CLA_METHOD | tr '[:upper:]' '[:lower:]') \
+  --save_model_every_n_step 300 \
+  --stop_training_at_step 300
+done

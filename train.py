@@ -719,7 +719,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         sharding_strategy=sharding_strategy,
         auto_wrap_policy=my_auto_wrap_policy,
         # backward_prefetch=None, #BackwardPrefetch.BACKWARD_PRE
-        use_orig_params=(args["train_type"] in ["full"] and args["cla_kv_cache_map"] is not None),
+        use_orig_params=False,
         cpu_offload=CPUOffload(offload_params=True) if args["use_cpu_offload"] else None,
         limit_all_gathers=True, # See https://github.com/pytorch/pytorch/issues/91165
         device_id=torch.cuda.current_device(),
@@ -952,6 +952,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
                 if args["stop_training_at_step"] is not None and current_training_step >= args["stop_training_at_step"]:
                     print(f"Stopping training at step {current_training_step}")
+                    save_model(rank, model, args, new_layer_names, step=current_training_step)
                     sys.exit(0)                            
 
                 if rank == 0 and args['verbose']:
@@ -1005,7 +1006,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if args["save_model"]:
         new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
         save_model(rank, model, args, new_layer_names, step=None)
-        save_optimizer(rank, model, optimizer, args, step=None)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 

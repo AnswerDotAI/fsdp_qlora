@@ -44,6 +44,9 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
     
     def layernorm_policy_fn(module):
          return isinstance(module, LlamaRMSNorm) and module.weight.requires_grad
+     
+    def embed_tokens_policy_fn(module):
+        return isinstance(module, nn.Embedding)
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
@@ -53,10 +56,12 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
         transformer_auto_wrap_policy,
         transformer_layer_cls=(LlamaDecoderLayer, MistralDecoderLayer, Qwen2DecoderLayer, Phi3DecoderLayer),
     )
+    embed_tokens_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=embed_tokens_policy_fn)
     if vanilla_policy:
-        return transformer_wrap_policy
-    
-    policies=[lambda_policy, transformer_wrap_policy]
+        policies=[transformer_wrap_policy, embed_tokens_policy]
+        return functools.partial(_or_policy, policies=policies)
+        
+    policies=[lambda_policy, transformer_wrap_policy, embed_tokens_policy]
     if not vanilla_policy:
         policies.extend([self_attn_policy, mlp_policy, layernorm_policy])
     return functools.partial(_or_policy, policies=policies)
