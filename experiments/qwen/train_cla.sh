@@ -31,12 +31,12 @@ for CLA_METHOD in CLA2_ADJ CLA2_NO_ADJ CLA3_ADJ CLA3_NO_ADJ; do
   --precision bf16 \
   --gradient_accumulation_steps 4 \
   --batch_size 2 \
-  --context_length 1536 \
+  --context_length 1024 \
   --use_gradient_checkpointing true \
   --use_cpu_offload false \
   --log_to wandb \
   --project_name qwen_cla_fp8kv \
-  --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1536 \
+  --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
   --verbose true \
   --low_memory true \
   --save_model true \
