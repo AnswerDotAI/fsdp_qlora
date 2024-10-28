@@ -1,7 +1,19 @@
+#! /bin/bash
+# bash train_cla.sh
+
 # Training models for CLA and fp8 KV recovery.
 
 # CLA(2) adjacent - layer_idx : kv_cache_idx
 CLA2_ADJ='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 10, 12: 10, 13: 10, 14: 10, 15: 10, 16: 10, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: 10, 27: 10, 28: 10, 29: 10, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: 17, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: 17, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: 27, 55: 27, 56: 27, 57: 27, 58: 27, 59: 27, 60: 28, 61: 29, 62: 30, 63: 31}'
+# CLA(2) adjacent - layer_idx : kv_cache_idx (stage-wise gradual unfreezing)
+CLA2_ADJ_STAGE_0='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: -1, 12: -1, 13: -1, 14: -1, 15: -1, 16: -1, 17: -1, 18: -1, 19: -1, 20: -1, 21: -1, 22: -1, 23: -1, 24: 10, 25: 10, 26: -1, 27: -1, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: -1, 38: -1, 39: -1, 40: 17, 41: 17, 42: -1, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: -1, 56: -1, 57: -1, 58: -1, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_1='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: -1, 12: -1, 13: -1, 14: -1, 15: -1, 16: -1, 17: -1, 18: -1, 19: -1, 20: -1, 21: 10, 22: -1, 23: 10, 24: 10, 25: 10, 26: -1, 27: -1, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: -1, 38: -1, 39: -1, 40: 17, 41: 17, 42: -1, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: -1, 56: -1, 57: 27, 58: 27, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_2='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: -1, 12: -1, 13: -1, 14: -1, 15: -1, 16: -1, 17: -1, 18: -1, 19: 10, 20: -1, 21: 10, 22: -1, 23: 10, 24: 10, 25: 10, 26: -1, 27: -1, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: -1, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: -1, 56: -1, 57: 27, 58: 27, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_3='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: -1, 12: -1, 13: -1, 14: -1, 15: -1, 16: -1, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: -1, 27: -1, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: -1, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: -1, 56: -1, 57: 27, 58: 27, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_4='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: -1, 12: -1, 13: -1, 14: -1, 15: -1, 16: -1, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: 10, 27: -1, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: 17, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: 27, 56: 27, 57: 27, 58: 27, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_5='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 10, 12: -1, 13: 10, 14: -1, 15: -1, 16: 10, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: 10, 27: 10, 28: -1, 29: -1, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: 17, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: -1, 55: 27, 56: 27, 57: 27, 58: 27, 59: -1, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_6='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 10, 12: 10, 13: 10, 14: -1, 15: -1, 16: 10, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: 10, 27: 10, 28: -1, 29: 10, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: 17, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: -1, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: 27, 55: 27, 56: 27, 57: 27, 58: 27, 59: 27, 60: 28, 61: 29, 62: 30, 63: 31}'
+CLA2_ADJ_STAGE_7='{0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, 11: 10, 12: 10, 13: 10, 14: 10, 15: 10, 16: 10, 17: 10, 18: 10, 19: 10, 20: 10, 21: 10, 22: 10, 23: 10, 24: 10, 25: 10, 26: 10, 27: 10, 28: 10, 29: 10, 30: 11, 31: 12, 32: 13, 33: 14, 34: 15, 35: 16, 36: 17, 37: 17, 38: 17, 39: 17, 40: 17, 41: 17, 42: 17, 43: 17, 44: 18, 45: 19, 46: 20, 47: 21, 48: 22, 49: 23, 50: 24, 51: 25, 52: 26, 53: 27, 54: 27, 55: 27, 56: 27, 57: 27, 58: 27, 59: 27, 60: 28, 61: 29, 62: 30, 63: 31}'
 
 # CLA(2) no adjacent - layer_idx : kv_cache_idx
 CLA2_NO_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7, 11: 7, 12: 8, 13: 8, 14: 8, 15: 9, 16: 9, 17: 10, 18: 10, 19: 10, 20: 11, 21: 11, 22: 12, 23: 12, 24: 12, 25: 12, 26: 13, 27: 13, 28: 14, 29: 14, 30: 15, 31: 15, 32: 16, 33: 16, 34: 17, 35: 17, 36: 18, 37: 18, 38: 19, 39: 19, 40: 19, 41: 19, 42: 20, 43: 20, 44: 21, 45: 21, 46: 22, 47: 22, 48: 22, 49: 23, 50: 23, 51: 24, 52: 24, 53: 25, 54: 25, 55: 26, 56: 26, 57: 27, 58: 27, 59: 28, 60: 28, 61: 29, 62: 30, 63: 31}'
@@ -15,32 +27,65 @@ CLA3_NO_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7,
 # --cla_kv_cache_map "$CLA2_ADJ" \
 # --fp8_kv_enabled true \
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 
-HOME=/workspace
+HOME=/home/k
 
-for CLA_METHOD in CLA2_ADJ CLA2_NO_ADJ CLA3_ADJ CLA3_NO_ADJ; do
-  cd $HOME/git/fsdp_qlora && python train.py \
-  --world_size 4 \
-  --master_port 12356 \
-  --model_name Qwen/Qwen2.5-32B-Instruct \
-  --cla_kv_cache_map "$(eval echo \$$CLA_METHOD)" \
-  --fp8_kv_enabled true \
-  --train_type full \
-  --sharding_strategy full_shard \
-  --precision bf16 \
-  --gradient_accumulation_steps 4 \
-  --batch_size 2 \
-  --context_length 1024 \
-  --use_gradient_checkpointing true \
-  --use_cpu_offload false \
-  --log_to wandb \
-  --project_name qwen_cla_fp8kv \
-  --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
-  --verbose true \
-  --low_memory true \
-  --save_model true \
-  --output_dir $HOME/models/qwen_cla_fp8kv_$(echo $CLA_METHOD | tr '[:upper:]' '[:lower:]') \
-  --save_model_every_n_step 300 \
-  --stop_training_at_step 300
+CLA_DEBUG='{0:0, 1:0, 2:1, 3:1}'
+CLA_DEBUG_STAGE_0='{0:0, 1:-1, 2:1, 3:-1}'
+CLA_DEBUG_STAGE_1='{0:0, 1:-1, 2:1, 3:1}'
+CLA_DEBUG_STAGE_2='{0:0, 1:0, 2:1, 3:1}'
+
+# Define the stages and their corresponding steps
+STAGE_STEPS=(
+    "CLA_DEBUG_STAGE_0 5"
+    "CLA_DEBUG_STAGE_1 10"
+    "CLA_DEBUG_STAGE_2 15"
+)
+NUM_STAGES=3
+STEP_PER_STAGE=5
+
+for STAGE_STEP in "${STAGE_STEPS[@]}"; do
+    read -r CLA_STAGE STEP <<< "$STAGE_STEP"
+    echo "Training with CLA stage '$(eval echo \$$CLA_STAGE)' until step $STEP"
+
+    PREVIOUS_STEP=$((STEP - STEP_PER_STAGE))
+
+    # Set resume_from_weights to none for first step, otherwise use previous checkpoint
+    RESUME_WEIGHTS_ARG=""
+    if [ "$PREVIOUS_STEP" -gt 0 ]; then
+        RESUME_WEIGHTS_ARG="--resume_from_weights $HOME/models/qwen_cla_fp8kv_debug/step_${PREVIOUS_STEP}/model_state_dict.safetensors"
+    fi    
+
+    cd $HOME/git/fsdp_qlora && python train.py \
+    --world_size 6 \
+    --master_port 12356 \
+    --model_name Qwen/Qwen2.5-32B-Instruct \
+    $RESUME_WEIGHTS_ARG \
+    --cla_kv_cache_map "$(eval echo \$$CLA_STAGE)" \
+    --fp8_kv_enabled true \
+    --train_type full \
+    --sharding_strategy full_shard \
+    --precision bf16 \
+    --gradient_accumulation_steps 4 \
+    --batch_size 2 \
+    --context_length 1024 \
+    --use_gradient_checkpointing true \
+    --use_cpu_offload false \
+    --log_to wandb \
+    --project_name qwen_cla_fp8kv \
+    --group cla2_adj_debug_gradual_unfreeze \
+    --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
+    --verbose true \
+    --low_memory true \
+    --save_model true \
+    --output_dir $HOME/models/qwen_cla_fp8kv_debug \
+    --save_model_every_n_step $STEP_PER_STAGE \
+    --stop_training_at_step $STEP
+    
+    # # delete previous checkpoint only if it exists
+    # if [ "$PREVIOUS_STEP" -gt 0 ]; then
+    #     rm -rf $HOME/models/qwen_cla_fp8kv_debug/step_${PREVIOUS_STEP}
+    # fi
+
 done

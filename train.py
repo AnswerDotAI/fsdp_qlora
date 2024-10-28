@@ -108,7 +108,7 @@ sys.path.append("./scripts")
 from dora import BNBDORA, HQQDORA, DORALayer, MagnitudeLayer
 from lora import LORA
 from scripts.train_utils import get_wrapping_policy
-from dataset_utils import get_dataloader
+from scripts.dataset_utils import get_dataloader
 
 from profiling_utils import profiling_context
 
@@ -130,13 +130,13 @@ class Logger:
             import wandb
             wandb.init(project=project_name, entity=entity, group=group, name=name, config=args)
 
-    def log(self, d:Dict, rank:int):
+    def log(self, d:Dict, rank:int, step:int=None):
         if rank != 0: return
         if self.log_to == "tqdm":
             for k,v in d.items():
                 tqdm.write(f'{k}: {v}')
         elif self.log_to == "wandb":
-            wandb.log(d)
+            wandb.log(d, step=step)
         elif self.log_to == "stdout":
             for k,v in d.items():
                 print(f'{k}: {v}')
@@ -422,15 +422,17 @@ def get_model_files(model_name):
 def create_compute_new_kv_map(cla_kv_cache_map) -> dict[int, bool]:
     "Returns a dict of decoder layer idxs and whether KV needs to be computed at that layer to be cached."
     if cla_kv_cache_map is None: return {}
-    comput_new_kv_map = {}
+    compute_new_kv_map = {}
     is_seen = set()
     for k,v in cla_kv_cache_map.items():
-        if v not in is_seen:
-            comput_new_kv_map[k] = True
+        if v == -1:
+            compute_new_kv_map[k] = True
+        elif v not in is_seen:
+            compute_new_kv_map[k] = True
             is_seen.add(v)
         else:
-            comput_new_kv_map[k] = False
-    return comput_new_kv_map
+            compute_new_kv_map[k] = False
+    return compute_new_kv_map
 
 
 # Main function, run on each process
@@ -940,7 +942,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                             log_lr = args["lr"]
                         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
                         if args["log_to"] == 'wandb':
-                            logger.log({"loss": log_loss, "lr": log_lr}, rank)
+                            logger.log({"loss": log_loss, "lr": log_lr}, rank, step=current_training_step)
                     ddp_loss = torch.zeros(2).to(local_rank)
 
                 # Save model every_n steps.
@@ -948,11 +950,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     print(f"Saving model at step {current_training_step}")
                     new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
                     save_model(rank, model, args, new_layer_names, step=current_training_step)
-                    save_optimizer(rank, model, optimizer, args, step=current_training_step)            
+                    if args["save_optimizer"]:
+                        save_optimizer(rank, model, optimizer, args, step=current_training_step)            
 
                 if args["stop_training_at_step"] is not None and current_training_step >= args["stop_training_at_step"]:
                     print(f"Stopping training at step {current_training_step}")
-                    save_model(rank, model, args, new_layer_names, step=current_training_step)
                     sys.exit(0)                            
 
                 if rank == 0 and args['verbose']:
@@ -1042,6 +1044,7 @@ def fsdp_qlora(
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
     resume_from_optimizer: str = None, # Resume training from a checkpoint
+    save_optimizer: bool = False, # Save the optimizer
     resumed_step: int = None, # Step to resume training from    
     stop_training_at_step: int = None, # Stop training at a specific step
     output_dir: str = "output", # Output directory to save the final model to
@@ -1198,6 +1201,7 @@ def main(
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
     resume_from_optimizer: str = None, # Resume training from a checkpoint
+    save_optimizer: bool_arg = False, # Save the optimizer
     resumed_step: int = None, # Step to resume training from    
     stop_training_at_step: int = None, # Stop training at a specific step
     output_dir: str = "output", # Output directory to save the final model to
