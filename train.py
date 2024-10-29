@@ -684,11 +684,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 p.requires_grad = True
                 if rank == 0: print("Trainable layer", n)
                     
-                    
+    current_training_step = 0
                     
     if args["log_to"] == 'wandb':
-        logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank)
-        logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank)
+        logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
+        logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank, current_training_step)
 
 
     if rank == 0 and args["resume_from_weights"]:
@@ -737,8 +737,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if rank == 0 or args['verbose']:
         print(f"Rank {rank}: Wrapped model: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
     if args["log_to"] == 'wandb':
-        logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank)
-        logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank)
+        logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
+        logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank, current_training_step)
 
 
     # Synchronize at the start
@@ -813,7 +813,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     progress_bar = tqdm(range(num_training_steps), disable=rank != 0)
     init_start_event.record()
     log_loss, log_lr = 0.0, -1
-    current_training_step = 0
     
     if args["resume_from_weights"] is not None:
         if args["resumed_step"] is not None:
@@ -865,8 +864,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     reserved_before_forward = torch.cuda.memory_reserved(local_rank)
                     memory_stats.append(f"Rank {rank}: Before forward: {reserved_before_forward/2**30:.2f} GiB")
                     if args["log_to"] == 'wandb':
-                        logger.log({"memory/allocated_before_forward": torch.cuda.memory_allocated(local_rank)}, rank)
-                        logger.log({"memory/reserved_before_forward": reserved_before_forward}, rank)
+                        logger.log({"memory/allocated_before_forward": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
+                        logger.log({"memory/reserved_before_forward": reserved_before_forward}, rank, current_training_step)
 
 
                 print(f"Batch shape: {batch['input_ids'].shape}")
@@ -888,8 +887,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         reserved_after_forward = torch.cuda.memory_reserved(local_rank)
                         memory_stats.append(f"Rank {rank}: After forward: {reserved_after_forward/2**30:.2f} GiB")
                         if args["log_to"] == 'wandb':
-                            logger.log({"memory/allocated_after_forward": torch.cuda.memory_allocated(local_rank)}, rank)
-                            logger.log({"memory/reserved_after_forward": reserved_after_forward}, rank)
+                            logger.log({"memory/allocated_after_forward": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
+                            logger.log({"memory/reserved_after_forward": reserved_after_forward}, rank, current_training_step)
 
                     # Backward pass
                     if scale_grads:
@@ -923,8 +922,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     reserved_after_backward = torch.cuda.memory_reserved(local_rank)
                     memory_stats.append(f"Rank {rank}: After backward: {reserved_after_backward/2**30:.2f} GiB")
                     if args["log_to"] == 'wandb':
-                        logger.log({"memory/allocated_after_backward": torch.cuda.memory_allocated(local_rank)}, rank)
-                        logger.log({"memory/reserved_after_backward": reserved_after_backward}, rank)
+                        logger.log({"memory/allocated_after_backward": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
+                        logger.log({"memory/reserved_after_backward": reserved_after_backward}, rank, current_training_step)
 
                 # Delete the output so more memory frees up before the next forward pass
                 output = None
@@ -946,7 +945,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                             log_lr = args["lr"]
                         update_progress_bar(progress_bar, epoch, log_loss, log_lr, rank)
                         if args["log_to"] == 'wandb':
-                            logger.log({"loss": log_loss, "lr": log_lr}, rank, step=current_training_step)
+                            logger.log({"loss": log_loss, "lr": log_lr}, rank, current_training_step)
                     ddp_loss = torch.zeros(2).to(local_rank)
 
                 # Save model every_n steps.
@@ -979,8 +978,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 memory_stats.append(f"Rank {rank}: Peak allocated memory: {peak_allocated_memory/2**30:.2f} GiB")
                 memory_stats.append(f"Rank {rank}: Peak reserved memory:  {peak_reserved_memory/2**30:.2f} GiB")
                 if args["log_to"] == 'wandb':
-                    logger.log({"memory/allocated_peak": peak_allocated_memory}, rank)
-                    logger.log({"memory/reserved_peak": peak_reserved_memory}, rank)
+                    logger.log({"memory/allocated_peak": peak_allocated_memory}, rank, current_training_step)
+                    logger.log({"memory/reserved_peak": peak_reserved_memory}, rank, current_training_step)
 
     # Synchronize at the end and record time
     init_end_event.record()
@@ -996,7 +995,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     torch.cuda.synchronize()
     if rank == 0:
         print(f"CUDA event elapsed time: {time_taken} sec")
-        logger.log({"time_taken": time_taken}, rank)
+        logger.log({"time_taken": time_taken}, rank, current_training_step)
     for line in memory_stats:
         print(line)
 
