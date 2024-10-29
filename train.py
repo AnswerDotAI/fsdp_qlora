@@ -668,8 +668,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if "layers" in n:
                 layer_idx = int(n.split('.')[2])
                 if compute_new_kv_map[layer_idx]:
-                    p.requires_grad = False
-                    if rank == 0: print("Frozen layer", n)
+                    if args["cla_full_fintune"]:
+                        p.requires_grad = True
+                        if rank == 0: print("Trainable layer", n)
+                    else:
+                        p.requires_grad = False
+                        if rank == 0: print("Frozen layer", n)
                 else:
                     p.requires_grad = True
                     if rank == 0: print("Trainable layer", n)
@@ -1040,6 +1044,7 @@ def fsdp_qlora(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
+    cla_full_fintune: bool = False, # Whether to train all decoder layers with CLA.
     save_model: bool = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
@@ -1197,6 +1202,7 @@ def main(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool_arg = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
+    cla_full_fintune: bool_arg = False, # Whether to train all decoder layers with CLA.
     save_model: bool_arg = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint

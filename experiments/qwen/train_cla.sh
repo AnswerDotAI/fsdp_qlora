@@ -27,23 +27,22 @@ CLA3_NO_ADJ='{0: 0, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5, 8: 6, 9: 6, 10: 7,
 # --cla_kv_cache_map "$CLA2_ADJ" \
 # --fp8_kv_enabled true \
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-HOME=/home/k
+HOME=/workspace
 
-CLA_DEBUG='{0:0, 1:0, 2:1, 3:1}'
-CLA_DEBUG_STAGE_0='{0:0, 1:-1, 2:1, 3:-1}'
-CLA_DEBUG_STAGE_1='{0:0, 1:-1, 2:1, 3:1}'
-CLA_DEBUG_STAGE_2='{0:0, 1:0, 2:1, 3:1}'
+# CLA_DEBUG='{0:0, 1:0, 2:1, 3:1}'
+# CLA_DEBUG_STAGE_0='{0:0, 1:-1, 2:1, 3:-1}'
+# CLA_DEBUG_STAGE_1='{0:0, 1:-1, 2:1, 3:1}'
+# CLA_DEBUG_STAGE_2='{0:0, 1:0, 2:1, 3:1}'
 
 # Define the stages and their corresponding steps
 STAGE_STEPS=(
-    "CLA_DEBUG_STAGE_0 5"
-    "CLA_DEBUG_STAGE_1 10"
-    "CLA_DEBUG_STAGE_2 15"
+    "CLA2_ADJ 300"
 )
-NUM_STAGES=3
-STEP_PER_STAGE=5
+NUM_STAGES=1
+STEP_PER_STAGE=300
+OUTPUT_DIR=qwen_cla_fp8kv_cla2_adj_full_finetune
 
 for STAGE_STEP in "${STAGE_STEPS[@]}"; do
     read -r CLA_STAGE STEP <<< "$STAGE_STEP"
@@ -54,38 +53,40 @@ for STAGE_STEP in "${STAGE_STEPS[@]}"; do
     # Set resume_from_weights to none for first step, otherwise use previous checkpoint
     RESUME_WEIGHTS_ARG=""
     if [ "$PREVIOUS_STEP" -gt 0 ]; then
-        RESUME_WEIGHTS_ARG="--resume_from_weights $HOME/models/qwen_cla_fp8kv_debug/step_${PREVIOUS_STEP}/model_state_dict.safetensors"
+        RESUME_WEIGHTS_ARG="--resume_from_weights $HOME/models/$OUTPUT_DIR/step_${PREVIOUS_STEP}/model_state_dict.safetensors"
     fi    
 
     cd $HOME/git/fsdp_qlora && python train.py \
-    --world_size 6 \
+    --world_size 8 \
     --master_port 12356 \
     --model_name Qwen/Qwen2.5-32B-Instruct \
     $RESUME_WEIGHTS_ARG \
     --cla_kv_cache_map "$(eval echo \$$CLA_STAGE)" \
+    --cla_full_fintune true \
     --fp8_kv_enabled true \
     --train_type full \
     --sharding_strategy full_shard \
     --precision bf16 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 2 \
     --batch_size 2 \
     --context_length 1024 \
     --use_gradient_checkpointing true \
     --use_cpu_offload false \
     --log_to wandb \
     --project_name qwen_cla_fp8kv \
-    --group cla2_adj_debug_gradual_unfreeze \
+    --group cla2_adj_full_finetune \
+    --name cla2_adj_full_finetune_step_${STEP} \
     --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
     --verbose true \
     --low_memory true \
     --save_model true \
-    --output_dir $HOME/models/qwen_cla_fp8kv_debug \
+    --output_dir $HOME/models/$OUTPUT_DIR \
     --save_model_every_n_step $STEP_PER_STAGE \
     --stop_training_at_step $STEP
     
-    # # delete previous checkpoint only if it exists
-    # if [ "$PREVIOUS_STEP" -gt 0 ]; then
-    #     rm -rf $HOME/models/qwen_cla_fp8kv_debug/step_${PREVIOUS_STEP}
-    # fi
+    # delete previous checkpoint only if it exists
+    if [ "$PREVIOUS_STEP" -gt 0 ]; then
+        rm -rf $HOME/models/$OUTPUT_DIR/step_${PREVIOUS_STEP}
+    fi
 
 done
