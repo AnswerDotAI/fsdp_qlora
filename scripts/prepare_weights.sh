@@ -101,3 +101,12 @@
 # --config_filename /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1/config.json \
 # --model_name meta-llama/Meta-Llama-3-8B-Instruct \
 # --save_dir /workspace/models/llama-3-8b-instruct-orca-math-10k-hqq-qdora-axis-1-merged
+
+
+# # Qwen32B-4bit
+# python prepare_vllm_weights.py \
+# --infer_type gemlite \
+# --model_name Qwen/Qwen2.5-32B-Instruct \
+# --nbits 4 \
+# --groupsize 128 \
+# --save_dir ~/models/qwen32b-4bit-gs128-gemlite | tee ~/models/qwen32b-4bit-gs128-gemlite/prepare_weights.log 2>&1

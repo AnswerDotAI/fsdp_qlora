@@ -167,7 +167,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                     quantized_state_dict[n.replace(".weight", ".zeros")]   = zeros_bitblas
                     print(f"Adding Bitblas quantized weights for {n}.")
                 elif args["infer_type"] == "merged":
-                    if args["disable_dora"]:
+                    if len(dora_weights) == 0:
                         merged_weight = W_est.detach().cpu()
                         print(f"Adding dequantized weights without DoRA for {n}.")
                     else:
@@ -191,7 +191,8 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 
             # DoRA weights.
             # import pdb; pdb.set_trace()
-            SKIP_DORA = (args["infer_type"] == "merged" or config_dict['skip_dora_all'] or (config_dict['skip_dora_4bit'] and NBITS == 4))
+            SKIP_DORA = (len(dora_weights) == 0 or args["infer_type"] == "merged" or 
+                         config_dict.get('skip_dora_all', False) or (config_dict.get('skip_dora_4bit', False) and NBITS == 4))
             if not SKIP_DORA:
                 lora_a = dora_weights[n.replace(".weight",".dora_layer.lora_A.weight")].cuda()
                 lora_b = dora_weights[n.replace(".weight",".dora_layer.lora_B.weight")].cuda()
@@ -199,7 +200,7 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
                 rescale = m / (W_est + lora_b @ lora_a).norm(p=2, dim=1).detach().cpu()
                 lora_a, lora_b = lora_a.cpu(), lora_b.cpu()
                 del W_est; torch.cuda.empty_cache()
-                if args["infer_type"] == "bitblas":
+                if args["insfer_type"] == "bitblas":
                     lora_a = lora_a.to(bitblas_dtype)
                     lora_b = lora_b.to(bitblas_dtype)
                     rescale = rescale.to(bitblas_dtype)
@@ -230,7 +231,6 @@ def quantize_and_save(filename, quantized_layers, layer_nbits, layer_groupsizes,
 
 @call_parse()
 def main(
-    train_type: Param("", choices=["hqq_dora"]) = "hqq_dora", # Which quantization strategy to use for inference.
     infer_type: Param("", choices=["tinygemm", "bitblas", "gemlite", "merged"]) = "tinygemm", # Which kernel strategy to use for inference.
     dora_safetensors_filename: str = None, # Used for lora/dora inference.
     use_existing_from: str = None, # Used to get quantized base weights from a different directory and replace only dora, and finally rename it.
@@ -301,19 +301,19 @@ def main(
         raise ValueError("Gate and up layers must have same group size.")
     
     dtype = getattr(torch, config_dict.get("compute_dtype", "bfloat16"))
-    lora_rank = config_dict.get("lora_rank", 64)
-    # lora_alpha = config_dict.get("lora_alpha", 16)
     
     MODEL_NAME = args["model_name"]
     idx = hub.cached_file(MODEL_NAME, SAFE_WEIGHTS_INDEX_NAME)
     pretrained_files, _ = hub.get_checkpoint_shard_files(MODEL_NAME, idx)
     
-    if args["disable_dora"]:
-        dora_weights = {}
-    else:
+    if args["dora_safetensors_filename"]:
         dora_weights = safetensors.torch.load_file(args["dora_safetensors_filename"])
+        lora_rank = config_dict.get("lora_rank", 64)
+    else:
+        dora_weights = {}
+        lora_rank = None
     
-    if config_dict['train_layernorms']:
+    if config_dict.get('train_layernorms', False):
         layernorm_layers = set([k for k in dora_weights.keys() if "layernorm" in k])
     else:
         layernorm_layers = set([])    
@@ -367,15 +367,15 @@ def main(
     block_influence_layers = config_dict.get("block_influence_layers", [])    
     if args["infer_type"] != "merged":
         quant_config_dict["skipped_dora_layers"] = []
-        if config_dict['skip_dora_all']:
+        if config_dict.get('skip_dora_all', False):
             quant_config_dict["skipped_dora_layers"] = list(vllm_nbits.keys())
-        if config_dict['skip_dora_4bit']:
+        if config_dict.get('skip_dora_4bit', False):
             quant_config_dict["skipped_dora_layers"] += [k for k,v in vllm_nbits.items() if v == 4]
         
         quant_config_dict["block_influence_layers"] = block_influence_layers
-        quant_config_dict["groupsize_4bit"]         = config_dict['groupsize_4bit']
+        quant_config_dict["groupsize_4bit"]         = config_dict.get('groupsize_4bit', None)
         
-        quant_config_dict["bitblas_dtype"] = args["bitblas_dtype"]
+        quant_config_dict["bitblas_dtype"] = "float16" if bitblas_dtype == torch.float16 else "bfloat16"
         
         quant_config_filename = save_dir/"quantize_config.json"
         with open(quant_config_filename, "w+") as f: json.dump(quant_config_dict, f)
