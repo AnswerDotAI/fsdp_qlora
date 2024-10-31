@@ -88,6 +88,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
     
     dataset_path = Path(args['dataset'])
     is_local = dataset_path.exists() and dataset_path.is_dir()
+    is_custom = False
 
     # Load the source dataset
     if args["dataset"] == "alpaca":
@@ -128,7 +129,11 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
         dataset = dataset.select(range(0,args['dataset_samples']))     
         dataset = dataset.map(convert_to_chat)
     elif is_local:
-        dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])        
+        dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])
+    else:
+        is_custom = True
+        dataset = load_dataset(args["dataset"], split="train").shuffle(seed=args["seed"])
+    
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))
 
@@ -141,13 +146,12 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
         dataset = InstructionDataset(dataset, tokenizer, style="qna_no_ctx", add_special_tokens=True)
     elif args["dataset"] == "orca_math_instruct":
         dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=True)
-    elif is_local:
+    elif is_local or is_custom:
         # local instruct datasets are already expected to be chat formatted, so we don't add special tokens.
         dataset = InstructionDataset(dataset, tokenizer, style="local", add_special_tokens=False)
     else: # (w/ alpaca prompt formatting)
         dataset = InstructionDataset(dataset, tokenizer, style="alpaca", add_special_tokens=True)
         
-
     # Collate function
     def collate_fn(batch, with_attention_mask=False, pad_to_nearest=pad_to_nearest, pad_to_context_length=False):
         # To list of tensors
@@ -179,7 +183,7 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
             labels    = torch.nn.functional.pad(labels, pad=(0,args["context_length"]-labels.shape[1]), value=-100)
             if with_attention_mask:
                 attention_masks = torch.nn.functional.pad(attention_masks, pad=(0,args["context_length"]-attention_masks.shape[1]), value=0)
-                
+       
         # Return dict
         return {'input_ids': input_ids, 'attention_mask': attention_masks, 'labels': labels}
 

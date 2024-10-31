@@ -379,7 +379,7 @@ def save_model(rank:int, model:nn.Module, args:Dict, cfg, new_layer_names:list[s
                 # TODO: Save model in original sharded format.
                 save_file(cpu_state_dict, os.path.join(output_dir, "model_state_dict.safetensors"))
                 print("Done", rank)    
-                    
+
                 # Save CLA config.
                 config_dict = cfg.to_dict()
                 config_dict['cla_kv_cache_map'] = {str(k):v for k,v in config_dict['cla_kv_cache_map'].items()}
@@ -387,7 +387,6 @@ def save_model(rank:int, model:nn.Module, args:Dict, cfg, new_layer_names:list[s
                 with open(model_config_filename, "w+") as f: 
                     json.dump(config_dict, f)    
                 
-
 
 def save_optimizer(rank, model, optimizer, args, step=None):
     
@@ -493,14 +492,12 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     else:
         raise ValueError("Invalid precision")
 
-
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args["model_name"])
     tokenizer.pad_token_id = tokenizer.eos_token_id # TODO check if it exists first
 
     # Set up dataloader
     dataloader = get_dataloader(tokenizer, args, pad_to_nearest=False)
-
 
     # Create model
     cfg = None
@@ -514,6 +511,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.torch_dtype = torch_dtype
         cfg.use_fp8_kv_scale = args["fp8_kv_enabled"]
         cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
+        cfg.cla_shared_coef = args["cla_shared_coef"] if args["cla_shared_coef"] else 0.0
         # DEBUG BEGIN 
         # cfg.num_hidden_layers = 4
         # DEBUG END
@@ -677,7 +675,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if "layers" in n:
                 layer_idx = int(n.split('.')[2])
                 if compute_new_kv_map[layer_idx]:
-                    if args["cla_full_fintune"]:
+                    if args["cla_full_finetune"]:
                         p.requires_grad = True
                         if rank == 0: print("Trainable layer", n)
                     else:
@@ -876,6 +874,14 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         logger.log({"memory/allocated_before_forward": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
                         logger.log({"memory/reserved_before_forward": reserved_before_forward}, rank, current_training_step)
 
+                # Set the cla_shared_coef based on training_step / num_training_steps
+                if args["cla_kv_cache_map"] is not None:
+                    cla_shared_coef = min(1.0, current_training_step / num_training_steps)
+                    if rank == 0:
+                        print(f"Updating CLA shared coef to {cla_shared_coef}")
+                        if current_training_step > num_training_steps:
+                            print(f"WARNING: current_training_step {current_training_step} > num_training_steps {num_training_steps}")
+                    model.update_cla_coef(cla_shared_coef)
 
                 print(f"Batch shape: {batch['input_ids'].shape}")
                 # Forward pass
@@ -1052,7 +1058,8 @@ def fsdp_qlora(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
-    cla_full_fintune: bool = False, # Whether to train all decoder layers with CLA.
+    cla_shared_coef: float = 0.0, # Coefficient for shared KV cache. 0.0 means no sharing, 1.0 means full sharing. Will be adjusted from 0 to 1 during CLA training.
+    cla_full_finetune: bool = False, # Whether to train all decoder layers with CLA.
     save_model: bool = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
@@ -1210,7 +1217,7 @@ def main(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool_arg = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
-    cla_full_fintune: bool_arg = False, # Whether to train all decoder layers with CLA.
+    cla_full_finetune: bool_arg = False, # Whether to train all decoder layers with CLA.
     save_model: bool_arg = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
