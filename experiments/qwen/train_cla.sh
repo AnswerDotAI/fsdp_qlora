@@ -56,13 +56,13 @@ for STAGE_STEP in "${STAGE_STEPS[@]}"; do
         RESUME_WEIGHTS_ARG="--resume_from_weights $HOME/models/$OUTPUT_DIR/step_${PREVIOUS_STEP}/model_state_dict.safetensors"
     fi    
 
-    cd $HOME/git/fsdp_qlora && python train.py \
+    cd $HOME/fsdp_qlora && python train.py \
     --world_size 8 \
     --master_port 12356 \
     --model_name Qwen/Qwen2.5-32B-Instruct \
     $RESUME_WEIGHTS_ARG \
     --cla_kv_cache_map "$(eval echo \$$CLA_STAGE)" \
-    --cla_full_fintune true \
+    --cla_full_finetune true \
     --fp8_kv_enabled true \
     --train_type full \
     --sharding_strategy full_shard \
@@ -76,7 +76,7 @@ for STAGE_STEP in "${STAGE_STEPS[@]}"; do
     --project_name qwen_cla_fp8kv \
     --group cla2_adj_full_finetune \
     --name cla2_adj_full_finetune_step_${STEP} \
-    --dataset $HOME/data/qwen_large_mix_dataset_v0_dedup_1024 \
+    --dataset answerdotai/qwen_large_mix_dataset_v0_dedup_1024 \
     --verbose true \
     --low_memory true \
     --save_model true \

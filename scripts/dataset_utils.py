@@ -132,7 +132,11 @@ def get_dataloader(tokenizer:PreTrainedTokenizerFast, args:Dict, pad_to_nearest=
         dataset = load_from_disk(str(dataset_path)).shuffle(seed=args["seed"])
     else:
         is_custom = True
-        dataset = load_dataset(args["dataset"], split="train").shuffle(seed=args["seed"])
+        import os
+        if os.environ.get("HF_TOKEN"):
+            dataset = load_dataset(args["dataset"], token=os.environ.get("HF_TOKEN"), split="train").shuffle(seed=args["seed"])
+        else:
+            dataset = load_dataset(args["dataset"], split="train").shuffle(seed=args["seed"])
     
     # truncate dataset so it's evenly divisible by grad_accumulation_steps
     dataset = dataset.select(range(0, len(dataset)-len(dataset)%(args["batch_size"]*args["gradient_accumulation_steps"])))

@@ -34,7 +34,7 @@ OUTPUT_DIR=qwen_cla_fp8kv_cla2_adj_full_finetune_interp
 STEP=300
 
 cd $HOME/fsdp_qlora && python train.py \
---world_size 8 \
+--world_size $gpu_count \
 --master_port 12356 \
 --model_name Qwen/Qwen2.5-${MODEL_SIZE}B-Instruct \
 --cla_kv_cache_map "$(echo $CLA2_ADJ)" \
@@ -43,8 +43,8 @@ cd $HOME/fsdp_qlora && python train.py \
 --train_type full \
 --sharding_strategy full_shard \
 --precision bf16 \
---gradient_accumulation_steps 2 \
---batch_size 2 \
+--gradient_accumulation_steps 6 \
+--batch_size 1 \
 --context_length 1024 \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \

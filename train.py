@@ -129,6 +129,8 @@ class Logger:
         self.log_to = log_to
         if self.log_to == "wandb" and rank==0:
             import wandb
+            if os.environ.get("WANDB_API_KEY"):
+                wandb.login(key=os.environ.get("WANDB_API_KEY"))
             wandb.init(project=project_name, entity=entity, group=group, name=name, config=args)
 
     def log(self, d:Dict, rank:int, step:int=None):
@@ -685,7 +687,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                     p.requires_grad = True
                     if rank == 0: print("Trainable layer", n)
             elif "embed_tokens" in n:
-                p.requires_grad = False
+                p.requires_grad = True
                 if rank == 0: print("Frozen layer", n)
             else:
                 p.requires_grad = True
@@ -696,7 +698,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_created": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
         logger.log({"memory/reserved_after_model_creation": torch.cuda.memory_reserved(local_rank)}, rank, current_training_step)
-
 
     if rank == 0 and args["resume_from_weights"]:
         # Load dora weights.
@@ -741,15 +742,17 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
             if (rank!=0 and args["low_memory"]) else None, # TODO note about meta device and why we need this
         mixed_precision=mp_policy,
     )
+    print("Completed FSDP wrapping")
     if rank == 0 or args['verbose']:
         print(f"Rank {rank}: Wrapped model: {torch.cuda.memory_reserved(local_rank)/2**30:.3f} GiB")
     if args["log_to"] == 'wandb':
         logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
         logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank, current_training_step)
 
-
+    print("Before barrier")
     # Synchronize at the start
     dist.barrier()
+    print("After barrier")
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
@@ -876,7 +879,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
                 # Set the cla_shared_coef based on training_step / num_training_steps
                 if args["cla_kv_cache_map"] is not None:
-                    cla_shared_coef = min(1.0, current_training_step / num_training_steps)
+                    # TODO return to just current_training_step / num_training_steps
+                    cla_shared_coef = min(1.0, 1.0 - current_training_step / num_training_steps)
                     if rank == 0:
                         print(f"Updating CLA shared coef to {cla_shared_coef}")
                         if current_training_step > num_training_steps:
