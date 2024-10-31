@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import types
+import json
 from contextlib import nullcontext
 from glob import glob
 from pathlib import Path
@@ -339,7 +340,7 @@ def get_optimizer(model:nn.Module, args:Dict):
         raise ValueError("Invalid optimizer")
 
 
-def save_model(rank:int, model:nn.Module, args:Dict, new_layer_names:list[str], step:int=None):
+def save_model(rank:int, model:nn.Module, args:Dict, cfg, new_layer_names:list[str], step:int=None):
     
     if step is None:
         output_dir = args["output_dir"]
@@ -378,6 +379,14 @@ def save_model(rank:int, model:nn.Module, args:Dict, new_layer_names:list[str], 
                 # TODO: Save model in original sharded format.
                 save_file(cpu_state_dict, os.path.join(output_dir, "model_state_dict.safetensors"))
                 print("Done", rank)    
+                    
+                # Save CLA config.
+                config_dict = cfg.to_dict()
+                config_dict['cla_kv_cache_map'] = {str(k):v for k,v in config_dict['cla_kv_cache_map'].items()}
+                model_config_filename = os.path.join(output_dir, "config.json")
+                with open(model_config_filename, "w+") as f: 
+                    json.dump(config_dict, f)    
+                
 
 
 def save_optimizer(rank, model, optimizer, args, step=None):
@@ -952,7 +961,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 if accumulate_grads and args["save_model"] and (current_training_step % args["save_model_every_n_step"] == 0):
                     print(f"Saving model at step {current_training_step}")
                     new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
-                    save_model(rank, model, args, new_layer_names, step=current_training_step)
+                    save_model(rank, model, args, cfg, new_layer_names, step=current_training_step)
                     if args["save_optimizer"]:
                         save_optimizer(rank, model, optimizer, args, step=current_training_step)            
 
@@ -1010,7 +1019,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     # summon_full_params on lora layers and save.
     if args["save_model"]:
         new_layer_names = None if args["train_type"] not in ["bnb_llama_pro", "hqq_llama_pro"] else new_layer_names
-        save_model(rank, model, args, new_layer_names, step=None)
+        save_model(rank, model, args, cfg, new_layer_names, step=None)
 
     dist.barrier() # Stop other processes ending while model saving - probably not needed?
 
