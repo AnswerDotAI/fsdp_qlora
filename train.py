@@ -73,6 +73,14 @@ from scripts.quant_utils import replace_linear, load_and_quantize
 from scripts.train_utils import Logger, update_progress_bar, get_wrapping_policy, get_optimizer, get_lr_scheduler
 from scripts.dataset_utils import get_dataloader
 
+# LIGER kernels.
+try:
+    from liger_kernel.transformers import apply_liger_kernel_to_llama, apply_liger_kernel_to_qwen2
+    apply_liger_kernel_to_llama()
+    apply_liger_kernel_to_qwen2()
+except ImportError:
+    print("See https://github.com/linkedin/Liger-Kernel to use LIGER kernels.")
+
 
 def save_model(rank, model, args, cfg, compute_dtype, layer_nbits, layer_groupsizes, step=None):
     
