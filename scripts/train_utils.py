@@ -1,4 +1,5 @@
 import os
+import wandb
 import functools
 from tqdm import tqdm
 from typing import Dict
@@ -14,8 +15,18 @@ from torch.distributed.fsdp.wrap import _or_policy, lambda_auto_wrap_policy, tra
 from transformers.optimization import get_linear_schedule_with_warmup
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LLAMA_ATTENTION_CLASSES, LlamaMLP, LlamaRMSNorm
 from transformers.models.mistral.modeling_mistral import MistralDecoderLayer, MISTRAL_ATTENTION_CLASSES, MistralMLP
-from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, QWEN2_ATTENTION_CLASSES, Qwen2MLP
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, QWEN2_ATTENTION_CLASSES, Qwen2MLP, Qwen2RMSNorm
 from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer, PHI3_ATTENTION_CLASSES, Phi3MLP
+
+
+RMSNORM_CLASSES = (LlamaRMSNorm, Qwen2RMSNorm)
+MLP_CLASSES = (LlamaMLP, MistralMLP, Qwen2MLP, Phi3MLP)
+try:
+    from liger_kernel.transformers import LigerRMSNorm, LigerGEGLUMLP, LigerSwiGLUMLP
+    RMSNORM_CLASSES += (LigerRMSNorm,)
+    MLP_CLASSES += (LigerGEGLUMLP, LigerSwiGLUMLP)
+except ImportError:
+    pass
 
 
 from .dora import DORALayer, MagnitudeLayer
@@ -83,10 +94,10 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, (LlamaMLP, MistralMLP, Qwen2MLP, Phi3MLP))
+        return isinstance(module, MLP_CLASSES)
     
     def layernorm_policy_fn(module):
-         return isinstance(module, LlamaRMSNorm) and module.weight.requires_grad
+         return isinstance(module, RMSNORM_CLASSES) and module.weight.requires_grad
 
     lambda_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=lambda_policy_fn)
     self_attn_policy = functools.partial(lambda_auto_wrap_policy, lambda_fn=self_attn_policy_fn)
@@ -158,7 +169,7 @@ def get_optimizer(model:nn.Module, args:Dict, rank:int):
         if args["train_layernorms"]:
             for module_name, module in model.named_modules():
                 # Check if the current module is an instance of any of the desired types (LayerNorm or torch.nn.Embedding).
-                if isinstance(module, (LlamaRMSNorm)) and any(layer in module_name for layer in ['input_layernorm', 'post_attention_layernorm']):
+                if isinstance(module, RMSNORM_CLASSES) and any(layer in module_name for layer in ['input_layernorm', 'post_attention_layernorm']):
                     if any(layer+"." in module_name for layer in block_influence_patterns):
                         if args["verbose"] and rank == 0:
                             print(block_influence_patterns)
