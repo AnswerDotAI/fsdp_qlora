@@ -31,7 +31,7 @@ fi
 # Define the stages and their corresponding steps
 MODEL_SIZE=0.5
 OUTPUT_DIR=qwen_cla_fp8kv_cla2_adj_full_finetune_interp
-STEP=300
+STEP=1000
 
 cd $HOME/fsdp_qlora && python train.py \
 --world_size $gpu_count \
@@ -43,8 +43,8 @@ cd $HOME/fsdp_qlora && python train.py \
 --train_type full \
 --sharding_strategy full_shard \
 --precision bf16 \
---gradient_accumulation_steps 6 \
---batch_size 1 \
+--gradient_accumulation_steps 2 \
+--batch_size 2 \
 --context_length 1024 \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \

@@ -879,8 +879,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
                 # Set the cla_shared_coef based on training_step / num_training_steps
                 if args["cla_kv_cache_map"] is not None:
-                    # TODO return to just current_training_step / num_training_steps
-                    cla_shared_coef = min(1.0, current_training_step / num_training_steps)
+                    denom = min(num_training_steps, args["stop_training_at_step"] or num_training_steps)
+                    cla_shared_coef = min(1.0, current_training_step / denom)
                     if rank == 0:
                         print(f"Updating CLA shared coef to {cla_shared_coef}")
                         if current_training_step > num_training_steps:
