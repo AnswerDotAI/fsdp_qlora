@@ -445,6 +445,35 @@ def create_compute_new_kv_map(cla_kv_cache_map) -> dict[int, bool]:
     return compute_new_kv_map
 
 
+def unfreeze_all_layers(args, rank, model, compute_new_kv_map):
+    for n,p in model.named_parameters():
+        if "layers" in n:
+            layer_idx = int(n.split('.')[2])
+            if compute_new_kv_map[layer_idx]:
+                if args["cla_full_finetune"]:
+                    p.requires_grad = True
+                    if rank == 0: print("Trainable layer", n)
+                else:
+                    p.requires_grad = False
+                    if rank == 0: print("Frozen layer", n)
+            else:
+                p.requires_grad = True
+                if rank == 0: print("Trainable layer", n)
+        elif "embed_tokens" in n:
+            p.requires_grad = True
+            if rank == 0: print("Frozen layer", n)
+        else:
+            p.requires_grad = True
+            if rank == 0: print("Trainable layer", n)
+        
+
+def unfreeze_cla_adapters(model):
+    for n,p in model.named_parameters():
+        if 'recovery' in n:
+            p.requires_grad = True
+            if rank == 0: print("Trainable layer", n)
+
+
 # Main function, run on each process
 def fsdp_main(local_rank:int, world_size:int, args:Dict):
 
@@ -506,7 +535,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     attn_impl = "flash_attention_2" # torch 2.2 sdpa uses flash attn 2
     if rank == 0 or args['verbose']:
         print("Creating model", rank)
-    if args["train_type"] in ["full", "lora", "custom_lora"]:
+    if args["train_type"] in ["full", "lora", "custom_lora", "cla_adapters"]:
         cfg = AutoConfig.from_pretrained(args["model_name"])
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
@@ -514,6 +543,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_fp8_kv_scale = args["fp8_kv_enabled"]
         cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
         cfg.cla_shared_coef = args["cla_shared_coef"] if args["cla_shared_coef"] else 0.0
+        cfg.cla_adapters = args["train_type"] == "cla_adapters"
         # DEBUG BEGIN 
         # cfg.num_hidden_layers = 4
         # DEBUG END
@@ -545,6 +575,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.use_cache = False
         cfg._attn_implementation = attn_impl
         skip_modules = ["lm_head"]
+        
+        cfg.use_fp8_kv_scale = args["fp8_kv_enabled"]
+        cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
+        cfg.cla_shared_coef = args["cla_shared_coef"] if args["cla_shared_coef"] else 0.0
+        cfg.cla_adapters = False
 
         if args["train_type"] in ["bnb_llama_pro", "hqq_llama_pro"]:
             llama_pro_path = Path(args["llama_pro_path"])
@@ -673,25 +708,11 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                 
     elif (args["train_type"] in ["full"]) and args["cla_kv_cache_map"] is not None:
         compute_new_kv_map = create_compute_new_kv_map(cfg.cla_kv_cache_map)
-        for n,p in model.named_parameters():
-            if "layers" in n:
-                layer_idx = int(n.split('.')[2])
-                if compute_new_kv_map[layer_idx]:
-                    if args["cla_full_finetune"]:
-                        p.requires_grad = True
-                        if rank == 0: print("Trainable layer", n)
-                    else:
-                        p.requires_grad = False
-                        if rank == 0: print("Frozen layer", n)
-                else:
-                    p.requires_grad = True
-                    if rank == 0: print("Trainable layer", n)
-            elif "embed_tokens" in n:
-                p.requires_grad = True
-                if rank == 0: print("Frozen layer", n)
-            else:
-                p.requires_grad = True
-                if rank == 0: print("Trainable layer", n)
+        unfreeze_all_layers(args, rank, model, compute_new_kv_map)
+    
+    elif (args["train_type"] in ["cla_adapters"]):
+        compute_new_kv_map = create_compute_new_kv_map(cfg.cla_kv_cache_map)
+        unfreeze_cla_adapters(model)
                     
     current_training_step = 0
                     
@@ -749,10 +770,8 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         logger.log({"memory/allocated_after_model_wrap": torch.cuda.memory_allocated(local_rank)}, rank, current_training_step)
         logger.log({"memory/reserved_after_model_wrap": torch.cuda.memory_reserved(local_rank)}, rank, current_training_step)
 
-    print("Before barrier")
     # Synchronize at the start
     dist.barrier()
-    print("After barrier")
 
     # Apply activation checkpointing
     if args["use_gradient_checkpointing"]:
@@ -816,7 +835,6 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
     scaler = ShardedGradScaler() if args["precision"] == "fp16_autocast" else None
     scale_grads = scaler is not None
 
-
     if rank == 0:
         print("Total Training Steps:", num_training_steps)
     memory_stats = []
@@ -878,7 +896,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
                         logger.log({"memory/reserved_before_forward": reserved_before_forward}, rank, current_training_step)
 
                 # Set the cla_shared_coef based on training_step / num_training_steps
-                if args["cla_kv_cache_map"] is not None:
+                if args["cla_kv_cache_map"] is not None and args["interpolate_cla"]:
                     denom = min(num_training_steps, args["stop_training_at_step"] or num_training_steps)
                     cla_shared_coef = min(1.0, current_training_step / denom)
                     if rank == 0:
@@ -1062,7 +1080,8 @@ def fsdp_qlora(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
-    cla_shared_coef: float = 0.0, # Coefficient for shared KV cache. 0.0 means no sharing, 1.0 means full sharing. Will be adjusted from 0 to 1 during CLA training.
+    cla_shared_coef: float = 1.0, # Coefficient for shared KV cache. 0.0 means no sharing, 1.0 means full sharing. Will be adjusted from 0 to 1 during CLA training.
+    interpolate_cla: bool = False, # Whether to interpolate CLA during training, e.g., adjust cla_shared_coef from 0 to 1.
     cla_full_finetune: bool = False, # Whether to train all decoder layers with CLA.
     save_model: bool = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps

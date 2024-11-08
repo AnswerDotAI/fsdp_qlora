@@ -29,29 +29,32 @@ else
 fi
 
 # Define the stages and their corresponding steps
-MODEL_SIZE=0.5
+MODEL_SIZE=32
 OUTPUT_DIR=qwen_cla_fp8kv_cla2_adj_full_finetune_interp
-STEP=1000
+STEP=300
+TRAIN_TYPE=hqq_dora
 
 cd $HOME/fsdp_qlora && python train.py \
 --world_size $gpu_count \
 --master_port 12356 \
 --model_name Qwen/Qwen2.5-${MODEL_SIZE}B-Instruct \
 --cla_kv_cache_map "$(echo $CLA2_ADJ)" \
---cla_full_finetune true \
+--cla_full_finetune false \
+--cla_shared_coef 1.0 \  # Use full sharing from onset.
+--interpolate_cla false \
 --fp8_kv_enabled true \
---train_type full \
+--train_type $TRAIN_TYPE \
 --sharding_strategy full_shard \
 --precision bf16 \
---gradient_accumulation_steps 2 \
---batch_size 2 \
+--gradient_accumulation_steps 4 \
+--batch_size 1 \
 --context_length 1024 \
 --use_gradient_checkpointing true \
 --use_cpu_offload false \
 --log_to wandb \
 --project_name qwen_cla_fp8kv \
---group cla2_adj_full_finetune_interp \
---name cla2_adj_full_finetune_interp_step_${STEP} \
+--group cla2_adj_adapter_finetune \
+--name cla2_adj_adapter_finetune_step_${STEP} \
 --dataset answerdotai/qwen_large_mix_dataset_v0_dedup_1024 \
 --verbose true \
 --low_memory true \
