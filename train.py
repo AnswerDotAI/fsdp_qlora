@@ -515,6 +515,7 @@ def fsdp_main(local_rank:int, world_size:int, args:Dict):
         cfg.cla_kv_cache_map = eval(args["cla_kv_cache_map"]) if args["cla_kv_cache_map"] else None
         cfg.cla_shared_coef = args["cla_shared_coef"] if args["cla_shared_coef"] else 0.0
         cfg.local_layers = eval(args["local_layers"]) if args["local_layers"] else None
+        cfg.sliding_window = args["sliding_window"] if args["sliding_window"] else None
         # DEBUG BEGIN 
         # cfg.num_hidden_layers = 4
         # DEBUG END
@@ -1063,6 +1064,8 @@ def fsdp_qlora(
     model_name: str = "meta-llama/Llama-2-7b-hf", # Which model to train - e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     fp8_kv_enabled: bool = False, # Whether to use FP8 KV caching
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
+    local_layers: str = None, # Local layers for local-global attention, e.g. "{10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52}"
+    sliding_window: int = 128, # Sliding window size for local-global attention
     cla_shared_coef: float = 0.0, # Coefficient for shared KV cache. 0.0 means no sharing, 1.0 means full sharing. Will be adjusted from 0 to 1 during CLA training.
     cla_full_finetune: bool = False, # Whether to train all decoder layers with CLA.
     save_model: bool = False, # Save the resulting model
@@ -1224,6 +1227,7 @@ def main(
     cla_kv_cache_map: str = None, # KV cache map for CLA, e.g. "{0:0, 1:1, 2:2, 3:3}"
     cla_full_finetune: bool_arg = False, # Whether to train all decoder layers with CLA.
     local_layers: str = None, # Local layers for local-global attention, e.g. "{10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52}"
+    sliding_window: int = 128, # Sliding window size for local-global attention
     save_model: bool_arg = False, # Save the resulting model
     save_model_every_n_step: int = 1000, # Save the model every n steps
     resume_from_weights: str = None, # Resume training from a checkpoint
