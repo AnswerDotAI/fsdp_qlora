@@ -84,12 +84,12 @@ except ImportError:
 # To add a new model, import the transformer, attention, & MLP layers
 # for the wrapping policy and `check_fn` in activation checkpointing
 from transformers.models.llama.modeling_llama import (
-    LLAMA_ATTENTION_CLASSES,
+    LlamaAttention,
     LlamaDecoderLayer,
     LlamaMLP,
 )
 from transformers.models.mistral.modeling_mistral import (
-    MISTRAL_ATTENTION_CLASSES,
+    MistralAttention,
     MistralDecoderLayer,
     MistralMLP,
 )
@@ -481,7 +481,7 @@ def get_wrapping_policy(custom_policy:bool=False, vanilla_policy:bool=False):
             )
     def self_attn_policy_fn(module):
         # Check module name is self_attn.
-        return isinstance(module, tuple((*LLAMA_ATTENTION_CLASSES.values(), *MISTRAL_ATTENTION_CLASSES.values())))
+        return isinstance(module, tuple((*LlamaAttention.values(), *MistralAttention.values())))
 
     def mlp_policy_fn(module):
         # Check module name is self_attn.
